@@ -1,5 +1,5 @@
 FROM golang:alpine AS builder
-WORKDIR /go/src/github.com/wzshiming/httpproxy/
+WORKDIR /go/src/github.com/wzshiming/socks5/
 COPY . .
 ENV CGO_ENABLED=0
 RUN go install ./cmd/socks5
