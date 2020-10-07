@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"os"
 	"reflect"
@@ -14,7 +15,6 @@ import (
 )
 
 var (
-	errUnknownAddress       = errors.New("unknown address type")
 	errStringTooLong        = errors.New("string too long")
 	errUserAuthFailed       = errors.New("user authentication failed")
 	errNoSupportedAuth      = errors.New("no supported authentication mechanism")
@@ -22,25 +22,29 @@ var (
 )
 
 const (
+	maxUdpPacket = math.MaxUint16 - 28
+)
+
+const (
 	socks5Version = 0x05
 )
 
 const (
-	connectCommand   command = 0x01
-	bindCommand      command = 0x02
-	associateCommand command = 0x03
+	ConnectCommand   Command = 0x01
+	BindCommand      Command = 0x02
+	AssociateCommand Command = 0x03
 )
 
-// command is a SOCKS command.
-type command byte
+// Command is a SOCKS Command.
+type Command byte
 
-func (cmd command) String() string {
+func (cmd Command) String() string {
 	switch cmd {
-	case connectCommand:
+	case ConnectCommand:
 		return "socks connect"
-	case bindCommand:
+	case BindCommand:
 		return "socks bind"
-	case associateCommand:
+	case AssociateCommand:
 		return "socks associate"
 	default:
 		return "socks " + strconv.Itoa(int(cmd))
@@ -59,7 +63,21 @@ const (
 	addrTypeNotSupported reply = 0x08
 )
 
-// reply is a SOCKS command reply code.
+func errToReply(err error) reply {
+	if err == nil {
+		return successReply
+	}
+	msg := err.Error()
+	resp := hostUnreachable
+	if strings.Contains(msg, "refused") {
+		resp = connectionRefused
+	} else if strings.Contains(msg, "network is unreachable") {
+		resp = networkUnreachable
+	}
+	return resp
+}
+
+// reply is a SOCKS Command reply code.
 type reply byte
 
 func (code reply) String() string {
@@ -79,7 +97,7 @@ func (code reply) String() string {
 	case ttlExpired:
 		return "TTL expired"
 	case commandNotSupported:
-		return "command not supported"
+		return "Command not supported"
 	case addrTypeNotSupported:
 		return "address type not supported"
 	default:
@@ -238,7 +256,10 @@ func writeAddr(w io.Writer, addr *Addr) error {
 				return err
 			}
 		} else {
-			return errUnknownAddress
+			_, err := w.Write([]byte{ipv4Address, 0, 0, 0, 0})
+			if err != nil {
+				return err
+			}
 		}
 	} else if addr.Name != "" {
 		if len(addr.Name) > 255 {
@@ -253,7 +274,10 @@ func writeAddr(w io.Writer, addr *Addr) error {
 			return err
 		}
 	} else {
-		return errUnknownAddress
+		_, err := w.Write([]byte{ipv4Address, 0, 0, 0, 0})
+		if err != nil {
+			return err
+		}
 	}
 	var p [2]byte
 	binary.BigEndian.PutUint16(p[:], uint16(addr.Port))

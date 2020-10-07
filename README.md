@@ -15,8 +15,8 @@ Socks5/Socks5h server and client
 [Example](https://github.com/wzshiming/socks5/blob/master/cmd/socks5/main.go)
 
 - [x] Support for the CONNECT command
-- [ ] Support for the BIND command
-- [ ] Support for the ASSOCIATE command
+- [x] Support for the BIND command
+- [x] Support for the ASSOCIATE command
 
 ## License
 

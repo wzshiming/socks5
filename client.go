@@ -10,21 +10,6 @@ import (
 	"time"
 )
 
-// Conn is a forward proxy connection.
-type Conn struct {
-	net.Conn
-	boundAddr net.Addr
-}
-
-// BoundAddr returns the address assigned by the proxy server for
-// connecting to the command target address from the proxy server.
-func (c *Conn) BoundAddr() net.Addr {
-	if c == nil {
-		return nil
-	}
-	return c.boundAddr
-}
-
 // Dialer is a SOCKS5 dialer.
 type Dialer struct {
 	// ProxyNetwork network between a proxy server and a client
@@ -80,22 +65,49 @@ func NewDialer(addr string) (*Dialer, error) {
 
 // DialContext connects to the provided address on the provided network.
 func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	switch network {
+	default:
+		return nil, fmt.Errorf("unsupported network %q", network)
+	case "tcp", "tcp4", "tcp6":
+		return d.do(ctx, ConnectCommand, address)
+	case "udp", "udp4", "udp6":
+		return d.do(ctx, AssociateCommand, address)
+	}
+}
+
+// Dial connects to the provided address on the provided network.
+func (d *Dialer) Dial(network, address string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, address)
+}
+
+func (d *Dialer) Listen(ctx context.Context, network, address string) (net.Listener, error) {
+	switch network {
+	default:
+		return nil, fmt.Errorf("unsupported network %q", network)
+	case "tcp", "tcp4", "tcp6":
+	}
+	return &listener{ctx: ctx, d: d, address: address}, nil
+}
+
+func (d *Dialer) do(ctx context.Context, cmd Command, address string) (net.Conn, error) {
 	if d.IsResolve {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, err
 		}
-		ip := net.ParseIP(host)
-		if ip == nil {
-			ipaddr, err := d.resolver().LookupIP(ctx, "ip4", host)
-			if err != nil {
-				ipaddr, err = d.resolver().LookupIP(ctx, "ip", host)
+		if host != "" {
+			ip := net.ParseIP(host)
+			if ip == nil {
+				ipaddr, err := d.resolver().LookupIP(ctx, "ip4", host)
 				if err != nil {
-					return nil, err
+					ipaddr, err = d.resolver().LookupIP(ctx, "ip", host)
+					if err != nil {
+						return nil, err
+					}
 				}
+				host := ipaddr[0].String()
+				address = net.JoinHostPort(host, port)
 			}
-			host := ipaddr[0].String()
-			address = net.JoinHostPort(host, port)
 		}
 	}
 
@@ -104,21 +116,10 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		return nil, err
 	}
 
-	addr, err := d.connect(ctx, conn, network, address)
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-
-	return &Conn{Conn: conn, boundAddr: addr}, nil
+	return d.connect(ctx, conn, cmd, address)
 }
 
-// Dial connects to the provided address on the provided network.
-func (d *Dialer) Dial(network, address string) (net.Conn, error) {
-	return d.DialContext(context.Background(), network, address)
-}
-
-func (d *Dialer) connect(ctx context.Context, conn net.Conn, network, address string) (net.Addr, error) {
+func (d *Dialer) connect(ctx context.Context, conn net.Conn, cmd Command, address string) (net.Conn, error) {
 	if d.Timeout != 0 {
 		deadline := time.Now().Add(d.Timeout)
 		if d, ok := ctx.Deadline(); !ok || deadline.Before(d) {
@@ -137,7 +138,48 @@ func (d *Dialer) connect(ctx context.Context, conn net.Conn, network, address st
 		return nil, err
 	}
 
-	return d.connectCommand(conn, network, address)
+	switch cmd {
+	default:
+		return nil, fmt.Errorf("unsupported Command %s", cmd)
+	case ConnectCommand:
+		_, err := d.connectCommand(conn, ConnectCommand, address)
+		if err != nil {
+			return nil, err
+		}
+		return conn, nil
+	case BindCommand:
+		_, err := d.connectCommand(conn, BindCommand, address)
+		if err != nil {
+			return nil, err
+		}
+		return conn, nil
+	case AssociateCommand:
+		addr, err := d.connectCommand(conn, AssociateCommand, address)
+		if err != nil {
+			return nil, err
+		}
+		udpConn, err := d.proxyDial(ctx, "udp", addr.String())
+		if err != nil {
+			return nil, err
+		}
+
+		go func() {
+			var buf [1]byte
+			for {
+				_, err := conn.Read(buf[:])
+				if err != nil {
+					udpConn.Close()
+					break
+				}
+			}
+		}()
+		conn, err := NewUDPConn(udpConn, address)
+		if err != nil {
+			return nil, err
+		}
+		return conn, nil
+	}
+
 }
 
 func (d *Dialer) connectAuth(conn net.Conn) error {
@@ -207,8 +249,8 @@ func (d *Dialer) connectAuth(conn net.Conn) error {
 	return nil
 }
 
-func (d *Dialer) connectCommand(conn net.Conn, network, address string) (net.Addr, error) {
-	_, err := conn.Write([]byte{socks5Version, byte(connectCommand), 0})
+func (d *Dialer) connectCommand(conn net.Conn, cmd Command, address string) (net.Addr, error) {
+	_, err := conn.Write([]byte{socks5Version, byte(cmd), 0})
 	if err != nil {
 		return nil, err
 	}
@@ -217,8 +259,12 @@ func (d *Dialer) connectCommand(conn net.Conn, network, address string) (net.Add
 		return nil, err
 	}
 
+	return d.readReply(conn)
+}
+
+func (d *Dialer) readReply(conn net.Conn) (net.Addr, error) {
 	var header [3]byte
-	_, err = io.ReadFull(conn, header[:])
+	_, err := io.ReadFull(conn, header[:])
 	if err != nil {
 		return nil, err
 	}
@@ -248,4 +294,42 @@ func (d *Dialer) proxyDial(ctx context.Context, network, address string) (net.Co
 		proxyDial = dialer.DialContext
 	}
 	return proxyDial(ctx, network, address)
+}
+
+type listener struct {
+	ctx     context.Context
+	d       *Dialer
+	address string
+}
+
+// Accept waits for and returns the next connection to the listener.
+func (l *listener) Accept() (net.Conn, error) {
+	conn, err := l.d.do(l.ctx, BindCommand, l.address)
+	if err != nil {
+		return nil, err
+	}
+	addr, err := l.d.readReply(conn)
+	if err != nil {
+		return nil, err
+	}
+	return &connect{Conn: conn, remoteAddr: addr}, nil
+}
+
+// Close closes the listener.
+func (l *listener) Close() error {
+	return nil
+}
+
+// Addr returns the listener's network address.
+func (l *listener) Addr() net.Addr {
+	return nil
+}
+
+type connect struct {
+	net.Conn
+	remoteAddr net.Addr
+}
+
+func (c *connect) RemoteAddr() net.Addr {
+	return c.remoteAddr
 }
