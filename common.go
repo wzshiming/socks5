@@ -111,17 +111,17 @@ const (
 	ipv6Address = 0x04
 )
 
-// Addr is a SOCKS-specific address.
+// address is a SOCKS-specific address.
 // Either Name or IP is used exclusively.
-type Addr struct {
+type address struct {
 	Name string // fully-qualified domain name
 	IP   net.IP
 	Port int
 }
 
-func (a *Addr) Network() string { return "socks5" }
+func (a *address) Network() string { return "socks5" }
 
-func (a *Addr) String() string {
+func (a *address) String() string {
 	if a == nil {
 		return "<nil>"
 	}
@@ -130,7 +130,7 @@ func (a *Addr) String() string {
 
 // Address returns a string suitable to dial; prefer returning IP-based
 // address, fallback to Name
-func (a Addr) Address() string {
+func (a address) Address() string {
 	port := strconv.Itoa(a.Port)
 	if 0 != len(a.IP) {
 		return net.JoinHostPort(a.IP.String(), port)
@@ -186,8 +186,8 @@ func readByte(r io.Reader) (byte, error) {
 	return buf[0], nil
 }
 
-func readAddr(r io.Reader) (*Addr, error) {
-	address := &Addr{}
+func readAddr(r io.Reader) (*address, error) {
+	address := &address{}
 
 	var addrType [1]byte
 	if _, err := r.Read(addrType[:]); err != nil {
@@ -228,7 +228,7 @@ func readAddr(r io.Reader) (*Addr, error) {
 	return address, nil
 }
 
-func writeAddr(w io.Writer, addr *Addr) error {
+func writeAddr(w io.Writer, addr *address) error {
 	if addr == nil {
 		_, err := w.Write([]byte{ipv4Address, 0, 0, 0, 0, 0, 0})
 		if err != nil {
@@ -285,15 +285,15 @@ func writeAddr(w io.Writer, addr *Addr) error {
 	return err
 }
 
-func writeAddrWithStr(w io.Writer, address string) error {
-	host, port, err := splitHostPort(address)
+func writeAddrWithStr(w io.Writer, addr string) error {
+	host, port, err := splitHostPort(addr)
 	if err != nil {
 		return err
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		return writeAddr(w, &Addr{IP: ip, Port: port})
+		return writeAddr(w, &address{IP: ip, Port: port})
 	}
-	return writeAddr(w, &Addr{Name: host, Port: port})
+	return writeAddr(w, &address{Name: host, Port: port})
 }
 
 func splitHostPort(address string) (string, int, error) {
@@ -344,17 +344,16 @@ func errno(v error) uintptr {
 	return 0
 }
 
-func tunnel(ctx context.Context, c1, c2 io.ReadWriteCloser) error {
+// tunnel create tunnels for two io.ReadWriteCloser
+func tunnel(ctx context.Context, c1, c2 io.ReadWriteCloser, buf1, buf2 []byte) error {
 	ctx, cancel := context.WithCancel(ctx)
 	var errs tunnelErr
 	go func() {
-		var buf [32 * 1024]byte
-		_, errs[0] = io.CopyBuffer(c1, c2, buf[:])
+		_, errs[0] = io.CopyBuffer(c1, c2, buf1)
 		cancel()
 	}()
 	go func() {
-		var buf [32 * 1024]byte
-		_, errs[1] = io.CopyBuffer(c2, c1, buf[:])
+		_, errs[1] = io.CopyBuffer(c2, c1, buf2)
 		cancel()
 	}()
 	<-ctx.Done()
@@ -376,4 +375,11 @@ func (t tunnelErr) FirstError() error {
 		}
 	}
 	return nil
+}
+
+// BytesPool is an interface for getting and returning temporary
+// bytes for use by io.CopyBuffer.
+type BytesPool interface {
+	Get() []byte
+	Put([]byte)
 }
