@@ -252,3 +252,25 @@ func TestBind(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+func TestSimpleServer(t *testing.T) {
+	s, err := NewSimpleServer("socks5://u:p@:0")
+
+	s.Start(context.Background())
+	defer s.Close()
+
+	dial, err := NewDialer(s.ProxyURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli := testServer.Client()
+	cli.Transport = &http.Transport{
+		DialContext: dial.DialContext,
+	}
+
+	resp, err := cli.Get(testServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+}
