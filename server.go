@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"reflect"
 )
@@ -18,11 +17,15 @@ type Server struct {
 	// establishing the transport connection.
 	ProxyDial func(context.Context, string, string) (net.Conn, error)
 	// Logger error log
-	Logger *log.Logger
+	Logger Logger
 	// Context is default context
 	Context context.Context
 	// BytesPool getting and returning temporary bytes for use by io.CopyBuffer
 	BytesPool BytesPool
+}
+
+type Logger interface {
+	Println(v ...interface{})
 }
 
 // NewServer creates a new Server
