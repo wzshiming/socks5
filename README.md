@@ -2,7 +2,7 @@
 
 Socks5/Socks5h server and client
 
-[![Build Status](https://travis-ci.org/wzshiming/socks5.svg?branch=master)](https://travis-ci.org/wzshiming/socks5)
+[![Build](https://github.com/wzshiming/socks5/actions/workflows/go-cross-build.yml/badge.svg)](https://github.com/wzshiming/socks5/actions/workflows/go-cross-build.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/wzshiming/socks5)](https://goreportcard.com/report/github.com/wzshiming/socks5)
 [![GoDoc](https://godoc.org/github.com/wzshiming/socks5?status.svg)](https://godoc.org/github.com/wzshiming/socks5)
 [![GitHub license](https://img.shields.io/github/license/wzshiming/socks5.svg)](https://github.com/wzshiming/socks5/blob/master/LICENSE)
@@ -15,6 +15,7 @@ The following is the implementation of other proxy protocols
 - [Socks4](https://github.com/wzshiming/socks4)
 - [HTTP Proxy](https://github.com/wzshiming/httpproxy)
 - [Shadow Socks](https://github.com/wzshiming/shadowsocks)
+- [SSH Proxy](https://github.com/wzshiming/sshproxy)
 
 ## Usage
 
@@ -28,4 +29,4 @@ The following is the implementation of other proxy protocols
 
 ## License
 
-Pouch is licensed under the MIT License. See [LICENSE](https://github.com/wzshiming/socks5/blob/master/LICENSE) for the full license text.
+Licensed under the MIT License. See [LICENSE](https://github.com/wzshiming/socks5/blob/master/LICENSE) for the full license text.
