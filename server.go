@@ -16,6 +16,9 @@ type Server struct {
 	// ProxyDial specifies the optional proxyDial function for
 	// establishing the transport connection.
 	ProxyDial func(context.Context, string, string) (net.Conn, error)
+	// ProxyListenPacket specifies the optional proxyListenPacket function for
+	// establishing the transport connection.
+	ProxyListenPacket func(context.Context, string, string) (net.PacketConn, error)
 	// Logger error log
 	Logger Logger
 	// Context is default context
@@ -294,8 +297,7 @@ func (s *Server) handleAssociate(req *request) error {
 		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
 	}
 
-	var lc net.ListenConfig
-	udpConn, err := lc.ListenPacket(ctx, "udp", ":0")
+	udpConn, err := s.proxyListenPacket(ctx, "udp", ":0")
 	if err != nil {
 		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
 			return fmt.Errorf("failed to send reply: %v", err)
@@ -362,6 +364,15 @@ func (s *Server) proxyDial(ctx context.Context, network, address string) (net.Co
 		proxyDial = dialer.DialContext
 	}
 	return proxyDial(ctx, network, address)
+}
+
+func (s *Server) proxyListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
+	proxyListenPacket := s.ProxyListenPacket
+	if proxyListenPacket == nil {
+		var listener net.ListenConfig
+		proxyListenPacket = listener.ListenPacket
+	}
+	return proxyListenPacket(ctx, network, address)
 }
 
 func (s *Server) context() context.Context {
