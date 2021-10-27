@@ -19,6 +19,8 @@ type Server struct {
 	// ProxyListenPacket specifies the optional proxyListenPacket function for
 	// establishing the transport connection.
 	ProxyListenPacket func(ctx context.Context, network string, address string) (net.PacketConn, error)
+	// PacketForwardAddress specifies the packet forwarding address
+	PacketForwardAddress func(ctx context.Context, destinationAddr string, packet net.PacketConn, conn net.Conn) (net.IP, int, error)
 	// Logger error log
 	Logger Logger
 	// Context is default context
@@ -306,12 +308,15 @@ func (s *Server) handleAssociate(req *request) error {
 	}
 	defer udpConn.Close()
 
-	localAddr := udpConn.LocalAddr()
-	local, ok := localAddr.(*net.UDPAddr)
-	if !ok {
-		return fmt.Errorf("connect to %v failed: local address is %s://%s", req.DestinationAddr, localAddr.Network(), localAddr.String())
+	replyPacketForwardAddress := defaultReplyPacketForwardAddress
+	if s.PacketForwardAddress != nil {
+		replyPacketForwardAddress = s.PacketForwardAddress
 	}
-	bind := address{IP: local.IP, Port: local.Port}
+	ip, port, err := replyPacketForwardAddress(ctx, destinationAddr, udpConn, req.Conn)
+	if err != nil {
+		return err
+	}
+	bind := address{IP: ip, Port: port}
 	if err := sendReply(req.Conn, successReply, &bind); err != nil {
 		return fmt.Errorf("failed to send reply: %v", err)
 	}
@@ -398,4 +403,19 @@ type request struct {
 	Username        string
 	Password        string
 	Conn            net.Conn
+}
+
+func defaultReplyPacketForwardAddress(ctx context.Context, destinationAddr string, packet net.PacketConn, conn net.Conn) (net.IP, int, error) {
+	udpLocal := packet.LocalAddr()
+	udpLocalAddr, ok := udpLocal.(*net.UDPAddr)
+	if !ok {
+		return nil, 0, fmt.Errorf("connect to %v failed: local address is %s://%s", destinationAddr, udpLocal.Network(), udpLocal.String())
+	}
+
+	tcpLocal := conn.LocalAddr()
+	tcpLocalAddr, ok := tcpLocal.(*net.TCPAddr)
+	if !ok {
+		return nil, 0, fmt.Errorf("connect to %v failed: local address is %s://%s", destinationAddr, tcpLocal.Network(), tcpLocal.String())
+	}
+	return tcpLocalAddr.IP, udpLocalAddr.Port, nil
 }
