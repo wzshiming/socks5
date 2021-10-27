@@ -18,7 +18,7 @@ type Dialer struct {
 	ProxyAddress string
 	// ProxyDial specifies the optional dial function for
 	// establishing the transport connection.
-	ProxyDial func(context.Context, string, string) (net.Conn, error)
+	ProxyDial func(ctx context.Context, network string, address string) (net.Conn, error)
 	// Username use username authentication if not empty
 	Username string
 	// Password use password authentication if not empty,
