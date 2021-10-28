@@ -4,74 +4,88 @@ import (
 	"bytes"
 	"errors"
 	"net"
-	"reflect"
 )
 
 var (
-	errBadHeader  = errors.New("bad header")
-	errBadAddress = errors.New("bad address")
+	errBadHeader = errors.New("bad header")
 )
 
 type UDPConn struct {
-	bufRead  [maxUdpPacket]byte
-	bufWrite [maxUdpPacket]byte
-	addr     net.Addr
-	prefix   []byte
-	net.Conn
+	bufRead       [maxUdpPacket]byte
+	bufWrite      [maxUdpPacket]byte
+	proxyAddress  net.Addr
+	defaultTarget net.Addr
+	prefix        []byte
+	net.PacketConn
 }
 
-func NewUDPConn(raw net.Conn, address string) (*UDPConn, error) {
-	buf := bytes.NewBuffer([]byte{0, 0, 0})
-	err := writeAddrWithStr(buf, address)
-	if err != nil {
-		return nil, err
-	}
-	addr, err := net.ResolveUDPAddr("udp", address)
-	if err != nil {
-		return nil, err
-	}
+func NewUDPConn(raw net.PacketConn, proxyAddress net.Addr, defaultTarget net.Addr) (*UDPConn, error) {
 	conn := &UDPConn{
-		Conn:   raw,
-		addr:   addr,
-		prefix: buf.Bytes(),
+		PacketConn:    raw,
+		proxyAddress:  proxyAddress,
+		defaultTarget: defaultTarget,
+		prefix:        []byte{0, 0, 0},
 	}
 	return conn, nil
 }
 
 // ReadFrom implements the net.PacketConn ReadFrom method.
 func (c *UDPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	n, err = c.Read(p)
-	return n, c.addr, err
+	n, addr, err = c.PacketConn.ReadFrom(c.bufRead[:])
+	if err != nil {
+		return 0, nil, err
+	}
+	if n < len(c.prefix) || addr.String() != c.proxyAddress.String() {
+		return 0, nil, errBadHeader
+	}
+	buf := bytes.NewBuffer(c.bufRead[len(c.prefix):])
+	a, err := readAddr(buf)
+	if err != nil {
+		return 0, nil, err
+	}
+	n = copy(p, buf.Bytes())
+	return n, a, nil
 }
 
 // WriteTo implements the net.PacketConn WriteTo method.
 func (c *UDPConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	if !reflect.DeepEqual(addr, c.addr) {
-		return 0, errBadAddress
+	buf := bytes.NewBuffer(c.bufWrite[:0])
+	buf.Write(c.prefix)
+	err = writeAddrWithStr(buf, addr.String())
+	if err != nil {
+		return 0, err
 	}
-	return c.Write(p)
+	n, err = buf.Write(p)
+	if err != nil {
+		return 0, err
+	}
+
+	data := buf.Bytes()
+	_, err = c.PacketConn.WriteTo(data, c.proxyAddress)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // Read implements the net.Conn Read method.
 func (c *UDPConn) Read(b []byte) (int, error) {
-	n, err := c.Conn.Read(c.bufWrite[:])
+	n, addr, err := c.ReadFrom(b)
 	if err != nil {
 		return 0, err
 	}
-	if !bytes.Equal(c.prefix, c.bufWrite[:len(c.prefix)]) {
-		return 0, errBadHeader
+	if addr.String() != c.defaultTarget.String() {
+		return c.Read(b)
 	}
-	n = copy(b[:n-len(c.prefix)], c.bufWrite[len(c.prefix):n])
-	return n, err
+	return n, nil
 }
 
 // Write implements the net.Conn Write method.
 func (c *UDPConn) Write(b []byte) (int, error) {
-	n := copy(c.bufRead[:], c.prefix)
-	n = copy(c.bufRead[n:], b)
-	n, err := c.Conn.Write(c.bufRead[:n+len(c.prefix)])
-	if err != nil {
-		return 0, err
-	}
-	return n - len(c.prefix), nil
+	return c.WriteTo(b, c.defaultTarget)
+}
+
+// RemoteAddr implements the net.Conn RemoteAddr method.
+func (c *UDPConn) RemoteAddr() net.Addr {
+	return c.defaultTarget
 }

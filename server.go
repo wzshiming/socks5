@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"reflect"
 )
 
 // Server is accepting connections and handling the details of the SOCKS5 protocol
@@ -281,25 +280,8 @@ func (s *Server) handleBind(req *request) error {
 
 func (s *Server) handleAssociate(req *request) error {
 	ctx := s.context()
-	bufAddr := bytes.NewBuffer([]byte{0, 0, 0})
-	destinationAddr := req.DestinationAddr.Address()
-	err := writeAddrWithStr(bufAddr, destinationAddr)
-	if err != nil {
-		if err := sendReply(req.Conn, hostUnreachable, nil); err != nil {
-			return fmt.Errorf("failed to send reply: %v", err)
-		}
-		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
-	}
-	prefix := bufAddr.Bytes()
-	udpAddr, err := net.ResolveUDPAddr("udp", destinationAddr)
-	if err != nil {
-		if err := sendReply(req.Conn, hostUnreachable, nil); err != nil {
-			return fmt.Errorf("failed to send reply: %v", err)
-		}
-		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
-	}
-
-	udpConn, err := s.proxyListenPacket(ctx, "udp", ":0")
+	destinationAddr := req.DestinationAddr.String()
+	udpConn, err := s.proxyListenPacket(ctx, "udp", destinationAddr)
 	if err != nil {
 		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
 			return fmt.Errorf("failed to send reply: %v", err)
@@ -332,8 +314,15 @@ func (s *Server) handleAssociate(req *request) error {
 		}
 	}()
 
-	var sourceAddr net.Addr
-	var buf [maxUdpPacket]byte
+	var (
+		sourceAddr  net.Addr
+		wantSource  string
+		targetAddr  net.Addr
+		wantTarget  string
+		replyPrefix []byte
+		buf         [maxUdpPacket]byte
+	)
+
 	for {
 		n, addr, err := udpConn.ReadFrom(buf[:])
 		if err != nil {
@@ -342,19 +331,51 @@ func (s *Server) handleAssociate(req *request) error {
 
 		if sourceAddr == nil {
 			sourceAddr = addr
+			wantSource = sourceAddr.String()
 		}
-		if reflect.DeepEqual(addr, sourceAddr) {
-			if !bytes.HasPrefix(buf[:n], prefix) {
+
+		gotAddr := addr.String()
+		if wantSource == gotAddr {
+			if n < 3 {
 				continue
 			}
-			_, err = udpConn.WriteTo(buf[len(prefix):n], udpAddr)
+			reader := bytes.NewBuffer(buf[3:n])
+			addr, err := readAddr(reader)
+			if err != nil {
+				if s.Logger != nil {
+					s.Logger.Println(err)
+				}
+				continue
+			}
+			if targetAddr == nil {
+				targetAddr = &net.UDPAddr{
+					IP:   addr.IP,
+					Port: addr.Port,
+				}
+				wantTarget = targetAddr.String()
+			}
+			if addr.String() != wantTarget {
+				if s.Logger != nil {
+					s.Logger.Println(fmt.Errorf("ignore non-target addresses %s", addr))
+				}
+				continue
+			}
+			_, err = udpConn.WriteTo(reader.Bytes(), targetAddr)
 			if err != nil {
 				return err
 			}
-		} else if reflect.DeepEqual(addr, udpAddr) {
-			copy(buf[len(prefix):n+len(prefix)], buf[:n])
-			copy(buf[:len(prefix)], prefix)
-			_, err = udpConn.WriteTo(buf[:n+len(prefix)], sourceAddr)
+		} else if targetAddr != nil && wantTarget == gotAddr {
+			if replyPrefix == nil {
+				b := bytes.NewBuffer(make([]byte, 3, 16))
+				err = writeAddrWithStr(b, wantTarget)
+				if err != nil {
+					return err
+				}
+				replyPrefix = b.Bytes()
+			}
+			copy(buf[len(replyPrefix):len(replyPrefix)+n], buf[:n])
+			copy(buf[:len(replyPrefix)], replyPrefix)
+			_, err = udpConn.WriteTo(buf[:len(replyPrefix)+n], sourceAddr)
 			if err != nil {
 				return err
 			}

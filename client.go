@@ -19,6 +19,9 @@ type Dialer struct {
 	// ProxyDial specifies the optional dial function for
 	// establishing the transport connection.
 	ProxyDial func(ctx context.Context, network string, address string) (net.Conn, error)
+	// ProxyPacketDial specifies the optional proxyPacketDial function for
+	// establishing the transport connection.
+	ProxyPacketDial func(ctx context.Context, network string, address string) (net.PacketConn, error)
 	// Username use username authentication if not empty
 	Username string
 	// Password use password authentication if not empty,
@@ -157,11 +160,35 @@ func (d *Dialer) connect(ctx context.Context, conn net.Conn, cmd Command, addres
 		}
 		return conn, nil
 	case AssociateCommand:
-		addr, err := d.connectCommand(conn, AssociateCommand, address)
+		targetIP, targetPort, err := splitHostPort(address)
 		if err != nil {
 			return nil, err
 		}
-		udpConn, err := d.proxyDial(ctx, "udp", addr.String())
+
+		addr, err := d.connectCommand(conn, AssociateCommand, ":0")
+		if err != nil {
+			return nil, err
+		}
+
+		proxyIP, proxyPort, err := splitHostPort(addr.String())
+		if err != nil {
+			return nil, err
+		}
+
+		udpConn, err := d.proxyPacketDial(ctx, "udp", ":0")
+		if err != nil {
+			return nil, err
+		}
+
+		targetAddr := &net.UDPAddr{
+			IP:   net.ParseIP(targetIP),
+			Port: targetPort,
+		}
+		proxyAddr := &net.UDPAddr{
+			IP:   net.ParseIP(proxyIP),
+			Port: proxyPort,
+		}
+		wrapConn, err := NewUDPConn(udpConn, proxyAddr, targetAddr)
 		if err != nil {
 			return nil, err
 		}
@@ -171,16 +198,12 @@ func (d *Dialer) connect(ctx context.Context, conn net.Conn, cmd Command, addres
 			for {
 				_, err := conn.Read(buf[:])
 				if err != nil {
-					udpConn.Close()
+					wrapConn.Close()
 					break
 				}
 			}
 		}()
-		conn, err := NewUDPConn(udpConn, address)
-		if err != nil {
-			return nil, err
-		}
-		return conn, nil
+		return wrapConn, nil
 	}
 
 }
@@ -297,6 +320,15 @@ func (d *Dialer) proxyDial(ctx context.Context, network, address string) (net.Co
 		proxyDial = dialer.DialContext
 	}
 	return proxyDial(ctx, network, address)
+}
+
+func (d *Dialer) proxyPacketDial(ctx context.Context, network, address string) (net.PacketConn, error) {
+	proxyPacketDial := d.ProxyPacketDial
+	if proxyPacketDial == nil {
+		var listener net.ListenConfig
+		proxyPacketDial = listener.ListenPacket
+	}
+	return proxyPacketDial(ctx, network, address)
 }
 
 type listener struct {
