@@ -15,6 +15,9 @@ type Server struct {
 	// ProxyDial specifies the optional proxyDial function for
 	// establishing the transport connection.
 	ProxyDial func(ctx context.Context, network string, address string) (net.Conn, error)
+	// ProxyListen specifies the optional proxyListen function for
+	// establishing the transport connection.
+	ProxyListen func(context.Context, string, string) (net.Listener, error)
 	// ProxyListenPacket specifies the optional proxyListenPacket function for
 	// establishing the transport connection.
 	ProxyListenPacket func(ctx context.Context, network string, address string) (net.PacketConn, error)
@@ -39,12 +42,20 @@ func NewServer() *Server {
 
 // ListenAndServe is used to create a listener and serve on it
 func (s *Server) ListenAndServe(network, addr string) error {
-	var lc net.ListenConfig
-	l, err := lc.Listen(s.context(), network, addr)
+	l, err := s.proxyListen(s.context(), network, addr)
 	if err != nil {
 		return err
 	}
 	return s.Serve(l)
+}
+
+func (s *Server) proxyListen(ctx context.Context, network, address string) (net.Listener, error) {
+	proxyListen := s.ProxyListen
+	if proxyListen == nil {
+		var listenConfig net.ListenConfig
+		proxyListen = listenConfig.Listen
+	}
+	return proxyListen(ctx, network, address)
 }
 
 // Serve is used to serve connections from a listener
