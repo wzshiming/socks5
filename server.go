@@ -3,6 +3,7 @@ package socks5
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -60,21 +61,35 @@ func (s *Server) proxyListen(ctx context.Context, network, address string) (net.
 
 // Serve is used to serve connections from a listener
 func (s *Server) Serve(l net.Listener) error {
+	stop := make(chan error)
+	next := make(chan net.Conn)
 	for {
-		conn, err := l.Accept()
-		if err != nil {
+		go func() {
+			if conn, err := l.Accept(); err != nil {
+				stop <- err
+			} else {
+				next <- conn
+			}
+		}()
+		select {
+		case err := <-stop:
+			_ = l.Close()
 			return err
+		case conn := <-next:
+			go s.ServeConn(conn, stop)
 		}
-		go s.ServeConn(conn)
 	}
 }
 
 // ServeConn is used to serve a single connection.
-func (s *Server) ServeConn(conn net.Conn) {
+func (s *Server) ServeConn(conn net.Conn, stop chan error) {
 	defer conn.Close()
 	err := s.serveConn(conn)
 	if err != nil && s.Logger != nil && !isClosedConnError(err) {
 		s.Logger.Println(err)
+	}
+	if errors.Is(err, io.EOF) {
+		stop <- err
 	}
 }
 
