@@ -38,7 +38,7 @@ func (c *UDPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	if n < len(c.prefix) || addr.String() != c.proxyAddress.String() {
 		return 0, nil, errBadHeader
 	}
-	buf := bytes.NewBuffer(c.bufRead[len(c.prefix):])
+	buf := bytes.NewBuffer(c.bufRead[len(c.prefix):n])
 	a, err := readAddr(buf)
 	if err != nil {
 		return 0, nil, err
