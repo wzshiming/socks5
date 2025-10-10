@@ -367,6 +367,7 @@ func (s *Server) handleAssociate(req *request) error {
 		} else {
 			// Packet from target back to client
 			// Build reply prefix with source address
+			// Buffer capacity: 3 (header) + 22 (max SOCKS5 address: 1+16+2 for IPv6+port or 1+1+255+2 for domain) + n (data)
 			replyBuf := bytes.NewBuffer(make([]byte, 0, 3+22+n))
 			replyBuf.Write([]byte{0, 0, 0})
 			err = writeAddrWithStr(replyBuf, gotAddr)
