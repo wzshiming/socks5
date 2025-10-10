@@ -326,12 +326,9 @@ func (s *Server) handleAssociate(req *request) error {
 	}()
 
 	var (
-		sourceAddr  net.Addr
-		wantSource  string
-		targetAddr  net.Addr
-		wantTarget  string
-		replyPrefix []byte
-		buf         [maxUdpPacket]byte
+		sourceAddr net.Addr
+		wantSource string
+		buf        [maxUdpPacket]byte
 	)
 
 	for {
@@ -347,46 +344,40 @@ func (s *Server) handleAssociate(req *request) error {
 
 		gotAddr := addr.String()
 		if wantSource == gotAddr {
+			// Packet from client to target
 			if n < 3 {
 				continue
 			}
 			reader := bytes.NewBuffer(buf[3:n])
-			addr, err := readAddr(reader)
+			targetAddr, err := readAddr(reader)
 			if err != nil {
 				if s.Logger != nil {
 					s.Logger.Println(err)
 				}
 				continue
 			}
-			if targetAddr == nil {
-				targetAddr = &net.UDPAddr{
-					IP:   addr.IP,
-					Port: addr.Port,
-				}
-				wantTarget = targetAddr.String()
+			target := &net.UDPAddr{
+				IP:   targetAddr.IP,
+				Port: targetAddr.Port,
 			}
-			if addr.String() != wantTarget {
-				if s.Logger != nil {
-					s.Logger.Println(fmt.Errorf("ignore non-target addresses %s", addr))
-				}
-				continue
-			}
-			_, err = udpConn.WriteTo(reader.Bytes(), targetAddr)
+			_, err = udpConn.WriteTo(reader.Bytes(), target)
 			if err != nil {
 				return err
 			}
-		} else if targetAddr != nil && wantTarget == gotAddr {
-			if replyPrefix == nil {
-				b := bytes.NewBuffer(make([]byte, 3, 16))
-				err = writeAddrWithStr(b, wantTarget)
-				if err != nil {
-					return err
+		} else {
+			// Packet from target back to client
+			// Build reply prefix with source address
+			replyBuf := bytes.NewBuffer(make([]byte, 0, 3+22+n))
+			replyBuf.Write([]byte{0, 0, 0})
+			err = writeAddrWithStr(replyBuf, gotAddr)
+			if err != nil {
+				if s.Logger != nil {
+					s.Logger.Println(err)
 				}
-				replyPrefix = b.Bytes()
+				continue
 			}
-			copy(buf[len(replyPrefix):len(replyPrefix)+n], buf[:n])
-			copy(buf[:len(replyPrefix)], replyPrefix)
-			_, err = udpConn.WriteTo(buf[:len(replyPrefix)+n], sourceAddr)
+			replyBuf.Write(buf[:n])
+			_, err = udpConn.WriteTo(replyBuf.Bytes(), sourceAddr)
 			if err != nil {
 				return err
 			}
