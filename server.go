@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // Server is accepting connections and handling the details of the SOCKS5 protocol
@@ -233,7 +236,24 @@ func (s *Server) handleConnect(req *request) error {
 func (s *Server) handleBind(req *request) error {
 	ctx := s.context()
 
-	var lc net.ListenConfig
+	// Use ListenConfig with SO_REUSEADDR and SO_REUSEPORT to allow
+	// multiple BIND listeners on the same port for parallel requests
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var err error
+			c.Control(func(fd uintptr) {
+				// Set SO_REUSEADDR to allow reuse of local addresses
+				err = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+				if err != nil {
+					return
+				}
+				// Set SO_REUSEPORT to allow multiple listeners on the same port
+				err = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+			})
+			return err
+		},
+	}
+	
 	listener, err := lc.Listen(ctx, "tcp", req.DestinationAddr.String())
 	if err != nil {
 		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {

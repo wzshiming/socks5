@@ -93,61 +93,7 @@ func (d *Dialer) Listen(ctx context.Context, network, address string) (net.Liste
 		return nil, fmt.Errorf("unsupported network %q", network)
 	case "tcp", "tcp4", "tcp6":
 	}
-	
-	// Create initial BIND connection and get the bound address
-	conn, boundAddr, err := d.setupBind(ctx, address)
-	if err != nil {
-		return nil, err
-	}
-	
-	ready := make(chan struct{}, 1)
-	ready <- struct{}{} // Signal that first connection is ready
-	
-	return &listener{
-		ctx:     ctx,
-		d:       d,
-		address: address,
-		addr:    boundAddr,
-		conn:    conn,
-		ready:   ready,
-		done:    make(chan struct{}),
-	}, nil
-}
-
-// setupBind creates a BIND connection and returns both the connection and the bound address
-func (d *Dialer) setupBind(ctx context.Context, address string) (net.Conn, net.Addr, error) {
-	conn, err := d.proxyDial(ctx, d.ProxyNetwork, d.ProxyAddress)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if d.Timeout != 0 {
-		deadline := time.Now().Add(d.Timeout)
-		if d, ok := ctx.Deadline(); !ok || deadline.Before(d) {
-			subCtx, cancel := context.WithDeadline(ctx, deadline)
-			defer cancel()
-			ctx = subCtx
-		}
-	}
-	if deadline, ok := ctx.Deadline(); ok && !deadline.IsZero() {
-		conn.SetDeadline(deadline)
-		defer conn.SetDeadline(time.Time{})
-	}
-
-	err = d.connectAuth(conn)
-	if err != nil {
-		conn.Close()
-		return nil, nil, err
-	}
-
-	// Send BIND command and read the first reply to get bound address
-	addr, err := d.connectCommand(conn, BindCommand, address)
-	if err != nil {
-		conn.Close()
-		return nil, nil, err
-	}
-
-	return conn, addr, nil
+	return &listener{ctx: ctx, d: d, address: address}, nil
 }
 
 func (d *Dialer) do(ctx context.Context, cmd Command, address string) (net.Conn, error) {
@@ -387,143 +333,73 @@ func (d *Dialer) proxyPacketDial(ctx context.Context, network, address string) (
 }
 
 type listener struct {
-	ctx          context.Context
-	d            *Dialer
-	address      string
-	addr         net.Addr
-	mu           sync.Mutex
-	conn         net.Conn
-	closed       bool
-	ready        chan struct{} // semaphore for ready-for-new-accept
-	readyClosed  bool          // tracks if ready channel is closed
-	done         chan struct{} // closed when listener is closed
+	ctx     context.Context
+	d       *Dialer
+	address string
+	addr    net.Addr
+	mu      sync.Mutex
+}
+
+// doBind is like do() but for BindCommand, and it returns the bind address
+func (l *listener) doBind() (conn net.Conn, bindAddr net.Addr, err error) {
+	conn, err = l.d.proxyDial(l.ctx, l.d.ProxyNetwork, l.d.ProxyAddress)
+	if err != nil {
+		return nil, nil, err
+	}
+	
+	if l.d.Timeout != 0 {
+		deadline := time.Now().Add(l.d.Timeout)
+		if d, ok := l.ctx.Deadline(); !ok || deadline.Before(d) {
+			subCtx, cancel := context.WithDeadline(l.ctx, deadline)
+			defer cancel()
+			l.ctx = subCtx
+		}
+	}
+	if deadline, ok := l.ctx.Deadline(); ok && !deadline.IsZero() {
+		conn.SetDeadline(deadline)
+		defer conn.SetDeadline(time.Time{})
+	}
+	
+	err = l.d.connectAuth(conn)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	
+	bindAddr, err = l.d.connectCommand(conn, BindCommand, l.address)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	
+	return conn, bindAddr, nil
 }
 
 // Accept waits for and returns the next connection to the listener.
 func (l *listener) Accept() (net.Conn, error) {
-	// Wait for ready signal or done signal
-	select {
-	case _, ok := <-l.ready:
-		if !ok {
-			return nil, net.ErrClosed
-		}
-	case <-l.done:
-		return nil, net.ErrClosed
+	conn, bindAddr, err := l.doBind()
+	if err != nil {
+		return nil, err
 	}
 	
+	// Save the bind address on first call
 	l.mu.Lock()
-	if l.closed {
-		l.mu.Unlock()
-		return nil, net.ErrClosed
+	if l.addr == nil {
+		l.addr = bindAddr
 	}
-	
-	currConn := l.conn
-	l.conn = nil
 	l.mu.Unlock()
 	
-	if currConn == nil {
-		return nil, net.ErrClosed
-	}
-	
-	// Read the second BIND reply (remote peer address) with done channel
-	addrChan := make(chan net.Addr, 1)
-	errChan := make(chan error, 1)
-	go func() {
-		addr, err := l.d.readReply(currConn)
-		if err != nil {
-			errChan <- err
-		} else {
-			addrChan <- addr
-		}
-	}()
-	
-	var addr net.Addr
-	var err error
-	select {
-	case addr = <-addrChan:
-		// Success
-	case err = <-errChan:
-		currConn.Close()
+	// Read the second BIND reply (remote peer address after connection)
+	addr, err := l.d.readReply(conn)
+	if err != nil {
+		conn.Close()
 		return nil, err
-	case <-l.done:
-		currConn.Close()
-		return nil, net.ErrClosed
 	}
-	
-	// Immediately start the next BIND connection for the next Accept
-	// Use the original address, not addr.String(), to preserve exact format
-	go func() {
-		nextConn, _, err := l.d.setupBind(l.ctx, l.address)
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		
-		if !l.closed && err == nil {
-			l.conn = nextConn
-			// Only send if channel hasn't been closed
-			if !l.readyClosed {
-				select {
-				case l.ready <- struct{}{}:
-				default:
-					// Channel might be full, clean up
-					if nextConn != nil {
-						nextConn.Close()
-						l.conn = nil
-					}
-				}
-			} else {
-				// Channel closed, clean up
-				if nextConn != nil {
-					nextConn.Close()
-					l.conn = nil
-				}
-			}
-		} else {
-			if nextConn != nil {
-				nextConn.Close()
-			}
-			if !l.closed {
-				l.closed = true
-			}
-			// Close the ready channel if it hasn't been closed yet
-			if !l.readyClosed {
-				close(l.ready)
-				l.readyClosed = true
-			}
-		}
-	}()
-	
-	return &connect{Conn: currConn, remoteAddr: addr}, nil
+	return &connect{Conn: conn, remoteAddr: addr}, nil
 }
 
 // Close closes the listener.
 func (l *listener) Close() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	
-	if l.closed {
-		return nil
-	}
-	l.closed = true
-	
-	// Close the done channel to unblock any Accept calls
-	close(l.done)
-	
-	if l.conn != nil {
-		l.conn.Close()
-		l.conn = nil
-	}
-	
-	// Drain and close the ready channel
-	if !l.readyClosed {
-		// Try to drain the channel
-		select {
-		case <-l.ready:
-		default:
-		}
-		close(l.ready)
-		l.readyClosed = true
-	}
-	
 	return nil
 }
 
