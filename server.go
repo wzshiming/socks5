@@ -469,11 +469,10 @@ func defaultReplyPacketForwardAddress(ctx context.Context, destinationAddr strin
 
 // bindListener tracks a listener for BIND operations with reuse support
 type bindListener struct {
-	listener  net.Listener
-	addr      string
-	timer     *time.Timer
-	inUse     bool
-	closeChan chan struct{}
+	listener net.Listener
+	addr     string
+	timer    *time.Timer
+	inUse    bool
 }
 
 // getOrCreateBindListener gets an existing listener for reuse or creates a new one
@@ -533,10 +532,9 @@ func (s *Server) getOrCreateBindListener(ctx context.Context, addr string) (net.
 	
 	// Register the listener for future reuse
 	bl := &bindListener{
-		listener:  listener,
-		addr:      actualAddr,
-		inUse:     true,
-		closeChan: make(chan struct{}),
+		listener: listener,
+		addr:     actualAddr,
+		inUse:    true,
 	}
 	s.bindListeners[actualAddr] = bl
 
@@ -569,10 +567,9 @@ func (s *Server) releaseBindListener(listener net.Listener, reused bool) {
 		defer s.bindListenersMu.Unlock()
 
 		// Double-check the listener is still not in use
-		if bl, exists := s.bindListeners[addr]; exists && !bl.inUse {
-			bl.listener.Close()
+		if entry, exists := s.bindListeners[addr]; exists && !entry.inUse {
+			entry.listener.Close()
 			delete(s.bindListeners, addr)
-			close(bl.closeChan)
 		}
 	})
 }
