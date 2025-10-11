@@ -329,6 +329,7 @@ func (s *Server) handleAssociate(req *request) error {
 		sourceAddr net.Addr
 		wantSource string
 		buf        [maxUdpPacket]byte
+		replyBuf   [262]byte // Buffer capacity: 3 (header) + 259 (max SOCKS5 address: 1+1+255+2 for domain name) + n (data) = 262 + n
 	)
 
 	for {
@@ -365,20 +366,21 @@ func (s *Server) handleAssociate(req *request) error {
 				return err
 			}
 		} else {
-			// Packet from target back to client
-			// Build reply prefix with source address
-			// Buffer capacity: 3 (header) + 22 (max SOCKS5 address: 1+16+2 for IPv6+port or 1+1+255+2 for domain) + n (data)
-			replyBuf := bytes.NewBuffer(make([]byte, 0, 3+22+n))
-			replyBuf.Write([]byte{0, 0, 0})
-			err = writeAddrWithStr(replyBuf, gotAddr)
+			headWriter := bytes.NewBuffer(replyBuf[:0])
+			headWriter.Write([]byte{0, 0, 0})
+			err = writeAddrWithStr(headWriter, gotAddr)
 			if err != nil {
 				if s.Logger != nil {
 					s.Logger.Println(err)
 				}
 				continue
 			}
-			replyBuf.Write(buf[:n])
-			_, err = udpConn.WriteTo(replyBuf.Bytes(), sourceAddr)
+			prefixLen := headWriter.Len()
+
+			copy(buf[prefixLen:prefixLen+n], buf[:n])
+			copy(buf[:prefixLen], headWriter.Bytes())
+
+			_, err = udpConn.WriteTo(buf[:prefixLen+n], sourceAddr)
 			if err != nil {
 				return err
 			}
