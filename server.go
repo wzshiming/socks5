@@ -377,6 +377,14 @@ func (s *Server) handleAssociate(req *request) error {
 			}
 			prefixLen := headWriter.Len()
 
+			// Check if data length plus header exceeds maximum UDP packet limit
+			if prefixLen+n > maxUdpPacket {
+				if s.Logger != nil {
+					s.Logger.Println(fmt.Errorf("dropping packet: data length (%d) + header length (%d) = %d exceeds max UDP packet size %d", n, prefixLen, prefixLen+n, maxUdpPacket))
+				}
+				continue
+			}
+
 			copy(buf[prefixLen:prefixLen+n], buf[:n])
 			copy(buf[:prefixLen], headWriter.Bytes())
 
