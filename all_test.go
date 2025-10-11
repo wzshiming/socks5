@@ -253,6 +253,98 @@ func TestBind(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestBindWithReservation(t *testing.T) {
+	listen, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listen.Close()
+
+	proxy := NewServer()
+	// Enable port reservation for 2 seconds
+	proxy.BindReserveDuration = 2 * time.Second
+	go proxy.Serve(listen)
+
+	dial, err := NewDialer("socks5://" + listen.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a SOCKS5 listener that will bind to a specific port
+	targetAddr := ":10005"
+	listener, err := dial.Listen(context.Background(), "tcp", targetAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First Accept - triggers first BIND on server
+	acceptChan := make(chan net.Conn, 2)
+	errChan := make(chan error, 2)
+	
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			errChan <- err
+		} else {
+			acceptChan <- conn
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Make first connection
+	conn1, err := net.Dial("tcp", "127.0.0.1:10005")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn1.Close()
+
+	select {
+	case accepted1 := <-acceptChan:
+		t.Log("First connection accepted")
+		accepted1.Close()
+	case err := <-errChan:
+		t.Fatal("First accept failed:", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("First accept timeout")
+	}
+
+	// Wait a bit but less than reservation duration
+	time.Sleep(500 * time.Millisecond)
+
+	// Second Accept - triggers second BIND on server (should reuse port)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			errChan <- err
+		} else {
+			acceptChan <- conn
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Make second connection to same port
+	conn2, err := net.Dial("tcp", "127.0.0.1:10005")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn2.Close()
+
+	select {
+	case accepted2 := <-acceptChan:
+		t.Log("Second connection accepted")
+		accepted2.Close()
+	case err := <-errChan:
+		t.Fatal("Second accept failed:", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Second accept timeout")
+	}
+
+	t.Log("SUCCESS: Both BIND operations completed on same port")
+}
+
+
 func TestSimpleServer(t *testing.T) {
 	s, err := NewSimpleServer("socks5://u:p@:0")
 

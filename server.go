@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
+	"time"
 )
 
 // Server is accepting connections and handling the details of the SOCKS5 protocol
@@ -29,6 +31,12 @@ type Server struct {
 	Context context.Context
 	// BytesPool getting and returning temporary bytes for use by io.CopyBuffer
 	BytesPool BytesPool
+	// BindReserveDuration specifies how long to keep a BIND port reserved for reuse after accepting a connection.
+	// If zero, ports are not reserved for reuse (default behavior).
+	BindReserveDuration time.Duration
+
+	bindListeners   map[string]*bindListener
+	bindListenersMu sync.Mutex
 }
 
 type Logger interface {
@@ -233,8 +241,7 @@ func (s *Server) handleConnect(req *request) error {
 func (s *Server) handleBind(req *request) error {
 	ctx := s.context()
 
-	var lc net.ListenConfig
-	listener, err := lc.Listen(ctx, "tcp", req.DestinationAddr.String())
+	listener, reused, err := s.getOrCreateBindListener(ctx, req.DestinationAddr.String())
 	if err != nil {
 		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
 			return fmt.Errorf("failed to send reply: %v", err)
@@ -245,24 +252,32 @@ func (s *Server) handleBind(req *request) error {
 	localAddr := listener.Addr()
 	local, ok := localAddr.(*net.TCPAddr)
 	if !ok {
-		listener.Close()
+		if !reused {
+			listener.Close()
+		}
 		return fmt.Errorf("connect to %v failed: local address is %s://%s", req.DestinationAddr, localAddr.Network(), localAddr.String())
 	}
 	bind := address{IP: local.IP, Port: local.Port}
 	if err := sendReply(req.Conn, successReply, &bind); err != nil {
-		listener.Close()
+		if !reused {
+			listener.Close()
+		}
 		return fmt.Errorf("failed to send reply: %v", err)
 	}
 
 	conn, err := listener.Accept()
 	if err != nil {
-		listener.Close()
+		if !reused {
+			listener.Close()
+		}
 		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
 			return fmt.Errorf("failed to send reply: %v", err)
 		}
 		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
 	}
-	listener.Close()
+	
+	// Release the listener for potential reuse instead of immediately closing
+	s.releaseBindListener(listener, reused)
 
 	remoteAddr := conn.RemoteAddr()
 	local, ok = remoteAddr.(*net.TCPAddr)
@@ -450,4 +465,114 @@ func defaultReplyPacketForwardAddress(ctx context.Context, destinationAddr strin
 		return nil, 0, fmt.Errorf("connect to %v failed: local address is %s://%s", destinationAddr, tcpLocal.Network(), tcpLocal.String())
 	}
 	return tcpLocalAddr.IP, udpLocalAddr.Port, nil
+}
+
+// bindListener tracks a listener for BIND operations with reuse support
+type bindListener struct {
+	listener  net.Listener
+	addr      string
+	timer     *time.Timer
+	inUse     bool
+	closeChan chan struct{}
+}
+
+// getOrCreateBindListener gets an existing listener for reuse or creates a new one
+func (s *Server) getOrCreateBindListener(ctx context.Context, addr string) (net.Listener, bool, error) {
+	if s.BindReserveDuration <= 0 {
+		// Port reservation disabled, create new listener
+		var lc net.ListenConfig
+		listener, err := lc.Listen(ctx, "tcp", addr)
+		return listener, false, err
+	}
+
+	s.bindListenersMu.Lock()
+	defer s.bindListenersMu.Unlock()
+
+	if s.bindListeners == nil {
+		s.bindListeners = make(map[string]*bindListener)
+	}
+
+	// First try to find an existing listener for the requested address
+	// We need to check all listeners because the requested address (e.g., ":10003")
+	// might match an actual bound address (e.g., "[::]:10003")
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		var lc net.ListenConfig
+		listener, err := lc.Listen(ctx, "tcp", addr)
+		return listener, false, err
+	}
+
+	// Look for available listeners on the same port
+	for _, bl := range s.bindListeners {
+		if !bl.inUse {
+			_, blPort, err := net.SplitHostPort(bl.addr)
+			if err == nil && blPort == port {
+				// Check if the host matches or is compatible
+				blHost, _, _ := net.SplitHostPort(bl.addr)
+				if host == "" || blHost == "::" || host == blHost {
+					// Stop the cleanup timer
+					if bl.timer != nil {
+						bl.timer.Stop()
+					}
+					bl.inUse = true
+					return bl.listener, true, nil
+				}
+			}
+		}
+	}
+
+	// Create a new listener
+	var lc net.ListenConfig
+	listener, err := lc.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Store using the actual bound address
+	actualAddr := listener.Addr().String()
+	
+	// Register the listener for future reuse
+	bl := &bindListener{
+		listener:  listener,
+		addr:      actualAddr,
+		inUse:     true,
+		closeChan: make(chan struct{}),
+	}
+	s.bindListeners[actualAddr] = bl
+
+	return listener, false, nil
+}
+
+// releaseBindListener marks a listener as available for reuse or closes it
+func (s *Server) releaseBindListener(listener net.Listener, reused bool) {
+	if s.BindReserveDuration <= 0 {
+		// Port reservation disabled, just close the listener
+		listener.Close()
+		return
+	}
+
+	s.bindListenersMu.Lock()
+	defer s.bindListenersMu.Unlock()
+
+	addr := listener.Addr().String()
+	bl, exists := s.bindListeners[addr]
+	if !exists {
+		listener.Close()
+		return
+	}
+
+	bl.inUse = false
+
+	// Set up a timer to close and clean up the listener after the reservation period
+	bl.timer = time.AfterFunc(s.BindReserveDuration, func() {
+		s.bindListenersMu.Lock()
+		defer s.bindListenersMu.Unlock()
+
+		// Double-check the listener is still not in use
+		if bl, exists := s.bindListeners[addr]; exists && !bl.inUse {
+			bl.listener.Close()
+			delete(s.bindListeners, addr)
+			close(bl.closeChan)
+		}
+	})
 }
