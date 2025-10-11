@@ -329,7 +329,7 @@ func (s *Server) handleAssociate(req *request) error {
 		sourceAddr net.Addr
 		wantSource string
 		buf        [maxUdpPacket]byte
-		replyBuf   [262]byte // Buffer for SOCKS5 header and address only: 3 bytes (header) + up to 259 bytes (max address: 1+1+255+2 for domain name) = 262 bytes. Does not include data.
+		replyBuf   [maxHeaderSize]byte
 	)
 
 	for {
