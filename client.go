@@ -387,15 +387,16 @@ func (d *Dialer) proxyPacketDial(ctx context.Context, network, address string) (
 }
 
 type listener struct {
-	ctx     context.Context
-	d       *Dialer
-	address string
-	addr    net.Addr
-	mu      sync.Mutex
-	conn    net.Conn
-	closed  bool
-	ready   chan struct{} // semaphore for ready-for-new-accept
-	done    chan struct{} // closed when listener is closed
+	ctx          context.Context
+	d            *Dialer
+	address      string
+	addr         net.Addr
+	mu           sync.Mutex
+	conn         net.Conn
+	closed       bool
+	ready        chan struct{} // semaphore for ready-for-new-accept
+	readyClosed  bool          // tracks if ready channel is closed
+	done         chan struct{} // closed when listener is closed
 }
 
 // Accept waits for and returns the next connection to the listener.
@@ -443,7 +444,6 @@ func (l *listener) Accept() (net.Conn, error) {
 		// Success
 	case err = <-errChan:
 		currConn.Close()
-		l.Close()
 		return nil, err
 	case <-l.done:
 		currConn.Close()
@@ -451,17 +451,30 @@ func (l *listener) Accept() (net.Conn, error) {
 	}
 	
 	// Immediately start the next BIND connection for the next Accept
+	// Use the original address, not addr.String(), to preserve exact format
 	go func() {
-		nextConn, _, err := l.d.setupBind(l.ctx, l.addr.String())
+		nextConn, _, err := l.d.setupBind(l.ctx, l.address)
 		l.mu.Lock()
+		defer l.mu.Unlock()
+		
 		if !l.closed && err == nil {
 			l.conn = nextConn
-			select {
-			case l.ready <- struct{}{}:
-			default:
-				// Channel might be closed or full, clean up
+			// Only send if channel hasn't been closed
+			if !l.readyClosed {
+				select {
+				case l.ready <- struct{}{}:
+				default:
+					// Channel might be full, clean up
+					if nextConn != nil {
+						nextConn.Close()
+						l.conn = nil
+					}
+				}
+			} else {
+				// Channel closed, clean up
 				if nextConn != nil {
 					nextConn.Close()
+					l.conn = nil
 				}
 			}
 		} else {
@@ -472,12 +485,11 @@ func (l *listener) Accept() (net.Conn, error) {
 				l.closed = true
 			}
 			// Close the ready channel if it hasn't been closed yet
-			if l.ready != nil {
+			if !l.readyClosed {
 				close(l.ready)
-				l.ready = nil
+				l.readyClosed = true
 			}
 		}
-		l.mu.Unlock()
 	}()
 	
 	return &connect{Conn: currConn, remoteAddr: addr}, nil
@@ -502,14 +514,14 @@ func (l *listener) Close() error {
 	}
 	
 	// Drain and close the ready channel
-	if l.ready != nil {
+	if !l.readyClosed {
 		// Try to drain the channel
 		select {
 		case <-l.ready:
 		default:
 		}
 		close(l.ready)
-		l.ready = nil
+		l.readyClosed = true
 	}
 	
 	return nil
