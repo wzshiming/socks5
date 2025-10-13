@@ -274,3 +274,187 @@ func TestSimpleServer(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+func TestBindParallel(t *testing.T) {
+	listen, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listen.Close()
+
+	proxy := NewServer()
+	go proxy.Serve(listen)
+
+	dial, err := NewDialer("socks5://" + listen.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create two listeners on the same port in parallel
+	const bindPort = ":10001"
+	ctx := context.Background()
+
+	listener1, err := dial.Listen(ctx, "tcp", bindPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener1.Close()
+
+	listener2, err := dial.Listen(ctx, "tcp", bindPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener2.Close()
+
+	// Start accepting on both listeners
+	done1 := make(chan net.Conn)
+	done2 := make(chan net.Conn)
+
+	go func() {
+		conn, err := listener1.Accept()
+		if err != nil {
+			t.Logf("listener1.Accept error: %v", err)
+			close(done1)
+			return
+		}
+		done1 <- conn
+	}()
+
+	go func() {
+		conn, err := listener2.Accept()
+		if err != nil {
+			t.Logf("listener2.Accept error: %v", err)
+			close(done2)
+			return
+		}
+		done2 <- conn
+	}()
+
+	// Give the listeners time to start
+	time.Sleep(time.Millisecond * 100)
+
+	// Connect to the bound port from two different clients
+	conn1, err := net.Dial("tcp", "127.0.0.1:10001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn1.Close()
+
+	conn2, err := net.Dial("tcp", "127.0.0.1:10001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn2.Close()
+
+	// Verify both listeners received a connection
+	select {
+	case conn := <-done1:
+		if conn != nil {
+			conn.Close()
+		}
+	case <-time.After(time.Second * 2):
+		t.Fatal("timeout waiting for connection on listener1")
+	}
+
+	select {
+	case conn := <-done2:
+		if conn != nil {
+			conn.Close()
+		}
+	case <-time.After(time.Second * 2):
+		t.Fatal("timeout waiting for connection on listener2")
+	}
+}
+
+func TestBindSerial(t *testing.T) {
+	listen, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listen.Close()
+
+	proxy := NewServer()
+	go proxy.Serve(listen)
+
+	dial, err := NewDialer("socks5://" + listen.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const bindPort = ":10002"
+	ctx := context.Background()
+
+	// First BIND request
+	listener1, err := dial.Listen(ctx, "tcp", bindPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done1 := make(chan net.Conn)
+	go func() {
+		conn, err := listener1.Accept()
+		if err != nil {
+			t.Logf("listener1.Accept error: %v", err)
+			close(done1)
+			return
+		}
+		done1 <- conn
+	}()
+
+	time.Sleep(time.Millisecond * 100)
+
+	// Connect to first listener
+	conn1, err := net.Dial("tcp", "127.0.0.1:10002")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case conn := <-done1:
+		if conn != nil {
+			conn.Close()
+		}
+		conn1.Close()
+	case <-time.After(time.Second * 2):
+		t.Fatal("timeout waiting for connection on listener1")
+	}
+
+	listener1.Close()
+
+	// Second BIND request to the same port (serial after first is done)
+	listener2, err := dial.Listen(ctx, "tcp", bindPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener2.Close()
+
+	done2 := make(chan net.Conn)
+	go func() {
+		conn, err := listener2.Accept()
+		if err != nil {
+			t.Logf("listener2.Accept error: %v", err)
+			close(done2)
+			return
+		}
+		done2 <- conn
+	}()
+
+	time.Sleep(time.Millisecond * 100)
+
+	// Connect to second listener
+	conn2, err := net.Dial("tcp", "127.0.0.1:10002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn2.Close()
+
+	select {
+	case conn := <-done2:
+		if conn != nil {
+			conn.Close()
+		}
+	case <-time.After(time.Second * 2):
+		t.Fatal("timeout waiting for connection on listener2")
+	}
+}
+

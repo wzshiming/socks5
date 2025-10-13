@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // Server is accepting connections and handling the details of the SOCKS5 protocol
@@ -233,7 +236,21 @@ func (s *Server) handleConnect(req *request) error {
 func (s *Server) handleBind(req *request) error {
 	ctx := s.context()
 
-	var lc net.ListenConfig
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var err error
+			c.Control(func(fd uintptr) {
+				// Enable SO_REUSEADDR to allow binding to an address in TIME_WAIT state
+				err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				if err != nil {
+					return
+				}
+				// Enable SO_REUSEPORT to allow multiple sockets to bind to the same address/port
+				err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+			})
+			return err
+		},
+	}
 	listener, err := lc.Listen(ctx, "tcp", req.DestinationAddr.String())
 	if err != nil {
 		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
