@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -333,18 +334,31 @@ func TestBindParallel(t *testing.T) {
 	// Give the listeners time to start
 	time.Sleep(time.Millisecond * 100)
 
-	// Connect to the bound port from two different clients
-	conn1, err := net.Dial("tcp", "127.0.0.1:10001")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn1.Close()
-
-	conn2, err := net.Dial("tcp", "127.0.0.1:10001")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn2.Close()
+	// Connect to the bound port from two different clients concurrently
+	var wg sync.WaitGroup
+	wg.Add(2)
+	
+	go func() {
+		defer wg.Done()
+		conn, err := net.Dial("tcp", "127.0.0.1:10001")
+		if err != nil {
+			t.Errorf("failed to dial: %v", err)
+			return
+		}
+		time.Sleep(time.Millisecond * 500) // Keep connection open
+		conn.Close()
+	}()
+	
+	go func() {
+		defer wg.Done()
+		conn, err := net.Dial("tcp", "127.0.0.1:10001")
+		if err != nil {
+			t.Errorf("failed to dial: %v", err)
+			return
+		}
+		time.Sleep(time.Millisecond * 500) // Keep connection open
+		conn.Close()
+	}()
 
 	// Verify both listeners received a connection
 	select {
@@ -364,6 +378,8 @@ func TestBindParallel(t *testing.T) {
 	case <-time.After(time.Second * 2):
 		t.Fatal("timeout waiting for connection on listener2")
 	}
+	
+	wg.Wait()
 }
 
 func TestBindSerial(t *testing.T) {
@@ -384,77 +400,76 @@ func TestBindSerial(t *testing.T) {
 	const bindPort = ":10002"
 	ctx := context.Background()
 
-	// First BIND request
+	// Create multiple BIND listeners on the same port in a short period of time
 	listener1, err := dial.Listen(ctx, "tcp", bindPort)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer listener1.Close()
 
-	done1 := make(chan net.Conn)
-	go func() {
-		conn, err := listener1.Accept()
-		if err != nil {
-			t.Logf("listener1.Accept error: %v", err)
-			close(done1)
-			return
-		}
-		done1 <- conn
-	}()
-
-	time.Sleep(time.Millisecond * 100)
-
-	// Connect to first listener
-	conn1, err := net.Dial("tcp", "127.0.0.1:10002")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	select {
-	case conn := <-done1:
-		if conn != nil {
-			conn.Close()
-		}
-		conn1.Close()
-	case <-time.After(time.Second * 2):
-		t.Fatal("timeout waiting for connection on listener1")
-	}
-
-	listener1.Close()
-
-	// Second BIND request to the same port (serial after first is done)
 	listener2, err := dial.Listen(ctx, "tcp", bindPort)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener2.Close()
 
-	done2 := make(chan net.Conn)
+	listener3, err := dial.Listen(ctx, "tcp", bindPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener3.Close()
+
+	// Start accepting on all listeners
+	done := make(chan net.Conn, 3)
+
+	go func() {
+		conn, err := listener1.Accept()
+		if err != nil {
+			t.Logf("listener1.Accept error: %v", err)
+			return
+		}
+		done <- conn
+	}()
+
 	go func() {
 		conn, err := listener2.Accept()
 		if err != nil {
 			t.Logf("listener2.Accept error: %v", err)
-			close(done2)
 			return
 		}
-		done2 <- conn
+		done <- conn
+	}()
+
+	go func() {
+		conn, err := listener3.Accept()
+		if err != nil {
+			t.Logf("listener3.Accept error: %v", err)
+			return
+		}
+		done <- conn
 	}()
 
 	time.Sleep(time.Millisecond * 100)
 
-	// Connect to second listener
-	conn2, err := net.Dial("tcp", "127.0.0.1:10002")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn2.Close()
-
-	select {
-	case conn := <-done2:
-		if conn != nil {
-			conn.Close()
+	// Connect to the bound port from multiple clients in a short period
+	for i := 0; i < 3; i++ {
+		conn, err := net.Dial("tcp", "127.0.0.1:10002")
+		if err != nil {
+			t.Fatal(err)
 		}
-	case <-time.After(time.Second * 2):
-		t.Fatal("timeout waiting for connection on listener2")
+		defer conn.Close()
+	}
+
+	// Verify all listeners received connections
+	for i := 0; i < 3; i++ {
+		select {
+		case conn := <-done:
+			if conn != nil {
+				conn.Close()
+			}
+		case <-time.After(time.Second * 2):
+			t.Fatalf("timeout waiting for connection %d", i+1)
+		}
 	}
 }
 

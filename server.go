@@ -7,8 +7,6 @@ import (
 	"io"
 	"net"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
 // Server is accepting connections and handling the details of the SOCKS5 protocol
@@ -240,13 +238,7 @@ func (s *Server) handleBind(req *request) error {
 		Control: func(network, address string, c syscall.RawConn) error {
 			var err error
 			c.Control(func(fd uintptr) {
-				// Enable SO_REUSEADDR to allow binding to an address in TIME_WAIT state
-				err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-				if err != nil {
-					return
-				}
-				// Enable SO_REUSEPORT to allow multiple sockets to bind to the same address/port
-				err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+				err = setReuseAddrAndPort(fd)
 			})
 			return err
 		},
