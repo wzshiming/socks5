@@ -23,6 +23,9 @@ var (
 
 const (
 	maxUdpPacket = math.MaxUint16 - 28
+	// maxHeaderSize is the maximum size of SOCKS5 header (3 bytes) plus address (up to 255 bytes for domain name)
+	// 3 bytes (header: RSV, RSV, FRAG) + 1 byte (ATYP) + 1 byte (domain length) + 255 bytes (domain) + 2 bytes (port) = 262 bytes
+	maxHeaderSize = 3 + 1 + 1 + 255 + 2
 )
 
 const (

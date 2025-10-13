@@ -225,6 +225,92 @@ func TestUDP(t *testing.T) {
 	}
 }
 
+func TestUDPMultiple(t *testing.T) {
+	// Create multiple UDP echo servers
+	const numServers = 3
+	echoServers := make([]net.PacketConn, numServers)
+	for i := 0; i < numServers; i++ {
+		packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer packet.Close()
+		echoServers[i] = packet
+
+		// Start echo server
+		go func(p net.PacketConn) {
+			var buf [maxUdpPacket]byte
+			for {
+				n, addr, err := p.ReadFrom(buf[:])
+				if err != nil {
+					return
+				}
+				_, err = p.WriteTo(buf[:n], addr)
+				if err != nil {
+					return
+				}
+			}
+		}(packet)
+	}
+
+	// Start SOCKS5 proxy
+	listen, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listen.Close()
+
+	proxy := NewServer()
+	go proxy.Serve(listen)
+
+	dial, err := NewDialer("socks5://" + listen.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create UDP association to first server
+	conn, err := dial.Dial("udp", echoServers[0].LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	pc, ok := conn.(net.PacketConn)
+	if !ok {
+		t.Fatal("connection is not a PacketConn")
+	}
+
+	// Test sending to multiple different destinations
+	for i := 0; i < numServers; i++ {
+		echoAddr := echoServers[i].LocalAddr()
+		want := []byte(strings.Repeat(string(rune('A'+i)), 100))
+
+		// Send to this echo server
+		_, err = pc.WriteTo(want, echoAddr)
+		if err != nil {
+			t.Fatalf("WriteTo server %d failed: %v", i, err)
+		}
+
+		// Read response
+		got := make([]byte, len(want)*2)
+		n, addr, err := pc.ReadFrom(got)
+		if err != nil {
+			t.Fatalf("ReadFrom server %d failed: %v", i, err)
+		}
+		got = got[:n]
+
+		// Verify response came from correct server
+		if addr.String() != echoAddr.String() {
+			t.Errorf("Response from wrong address: got %v, want %v", addr, echoAddr)
+		}
+
+		// Verify data
+		if !bytes.Equal(want, got) {
+			t.Errorf("Echo from server %d failed: got %x, want %x", i, got, want)
+		}
+	}
+}
+
 func TestBind(t *testing.T) {
 	listen, err := net.Listen("tcp", ":0")
 	if err != nil {
