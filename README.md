@@ -2,6 +2,7 @@
 
 Socks5/Socks5h server and client
 
+[![Test](https://github.com/wzshiming/socks5/actions/workflows/test.yml/badge.svg)](https://github.com/wzshiming/socks5/actions/workflows/test.yml)
 [![Build](https://github.com/wzshiming/socks5/actions/workflows/go-cross-build.yml/badge.svg)](https://github.com/wzshiming/socks5/actions/workflows/go-cross-build.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/wzshiming/socks5)](https://goreportcard.com/report/github.com/wzshiming/socks5)
 [![GoDoc](https://godoc.org/github.com/wzshiming/socks5?status.svg)](https://godoc.org/github.com/wzshiming/socks5)
