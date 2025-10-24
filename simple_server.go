@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"time"
 )
 
 // SimpleServer is a simplified server, which can be configured as easily as client.
@@ -44,6 +45,7 @@ func NewSimpleServer(addr string) (*SimpleServer, error) {
 
 	s.Address = host
 	s.Network = "tcp"
+	s.ListenBindReuseTimeout = time.Second / 2
 	return s, nil
 }
 
