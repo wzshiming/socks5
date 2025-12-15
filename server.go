@@ -327,7 +327,7 @@ func (s *Server) handleBind(req *request) error {
 func (s *Server) handleAssociate(req *request) error {
 	ctx := s.context()
 	destinationAddr := req.DestinationAddr.String()
-	
+
 	// Create relay connection for client communication
 	relayConn, err := s.proxyListenPacket(ctx, "udp", destinationAddr)
 	if err != nil {
@@ -353,7 +353,7 @@ func (s *Server) handleAssociate(req *request) error {
 
 	// Check if we should use separate connections for outgoing traffic
 	useSeparateConn := s.ProxyOutgoingListenPacket != nil
-	
+
 	var outgoingConn net.PacketConn
 	if useSeparateConn {
 		// Create separate connection for outgoing traffic
@@ -367,7 +367,7 @@ func (s *Server) handleAssociate(req *request) error {
 		defer outgoingConn.Close()
 		return s.handleAssociateWithSeparateConns(ctx, req, relayConn, outgoingConn)
 	}
-	
+
 	// Use legacy single-connection mode
 	return s.handleAssociateLegacy(ctx, req, relayConn)
 }
@@ -458,7 +458,7 @@ func (s *Server) handleAssociateLegacy(ctx context.Context, req *request, udpCon
 func (s *Server) handleAssociateWithSeparateConns(ctx context.Context, req *request, relayConn, outgoingConn net.PacketConn) error {
 	// Buffer size of 3 to hold errors from 3 goroutines (TCP monitor, relay reader, outgoing reader)
 	errChan := make(chan error, 3)
-	
+
 	// Monitor TCP connection and close UDP connections when it closes
 	go func() {
 		var buf [1]byte
@@ -475,7 +475,7 @@ func (s *Server) handleAssociateWithSeparateConns(ctx context.Context, req *requ
 
 	// Use a channel to communicate the source address
 	sourceAddrChan := make(chan net.Addr, 1)
-	
+
 	// Handle packets from client to remote destinations
 	go func() {
 		var buf [maxUdpPacket]byte
@@ -515,12 +515,12 @@ func (s *Server) handleAssociateWithSeparateConns(ctx context.Context, req *requ
 			}
 		}
 	}()
-	
+
 	// Handle packets from remote destinations to client
 	go func() {
 		var buf [maxUdpPacket]byte
 		var replyBuf [maxHeaderSize]byte
-		
+
 		// Wait for source address to be set with timeout
 		var sourceAddr net.Addr
 		select {
@@ -530,7 +530,7 @@ func (s *Server) handleAssociateWithSeparateConns(ctx context.Context, req *requ
 			errChan <- fmt.Errorf("timeout waiting for client packet")
 			return
 		}
-		
+
 		for {
 			n, addr, err := outgoingConn.ReadFrom(buf[:])
 			if err != nil {
@@ -568,7 +568,7 @@ func (s *Server) handleAssociateWithSeparateConns(ctx context.Context, req *requ
 			}
 		}
 	}()
-	
+
 	// Wait for any error or connection close
 	return <-errChan
 }
