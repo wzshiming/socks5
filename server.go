@@ -26,7 +26,7 @@ type Server struct {
 	ProxyListenPacket func(ctx context.Context, network string, address string) (net.PacketConn, error)
 	// ProxyOutgoingListenPacket specifies the optional proxyOutgoingListenPacket function for
 	// establishing the outgoing UDP connection in UDP Associate.
-	// If not set, it falls back to proxyDial for outgoing connections.
+	// If not set, it falls back to standard ListenPacket with an empty local address.
 	ProxyOutgoingListenPacket func(ctx context.Context, network string, address string) (net.PacketConn, error)
 	// PacketForwardAddress specifies the packet forwarding address
 	PacketForwardAddress func(ctx context.Context, destinationAddr string, packet net.PacketConn, conn net.Conn) (net.IP, int, error)
@@ -375,8 +375,10 @@ func (s *Server) handleAssociate(req *request) error {
 	}()
 
 	var (
-		sourceAddr   net.Addr
-		sourceAddrMu sync.Mutex
+		sourceAddr      net.Addr
+		sourceAddrMu    sync.Mutex
+		sourceAddrReady = make(chan struct{})
+		sourceAddrOnce  sync.Once
 	)
 
 	errCh := make(chan error, 2)
@@ -394,6 +396,9 @@ func (s *Server) handleAssociate(req *request) error {
 			sourceAddrMu.Lock()
 			if sourceAddr == nil {
 				sourceAddr = addr
+				sourceAddrOnce.Do(func() {
+					close(sourceAddrReady)
+				})
 			}
 			sourceAddrMu.Unlock()
 
@@ -423,6 +428,9 @@ func (s *Server) handleAssociate(req *request) error {
 
 	// Goroutine 2: Read from outgoing (destinations) and forward to relay (client)
 	go func() {
+		// Wait for the first packet from client to establish sourceAddr
+		<-sourceAddrReady
+
 		var buf [maxUdpPacket]byte
 		var replyBuf [maxHeaderSize]byte
 		for {
@@ -435,11 +443,6 @@ func (s *Server) handleAssociate(req *request) error {
 			sourceAddrMu.Lock()
 			currentSourceAddr := sourceAddr
 			sourceAddrMu.Unlock()
-
-			if currentSourceAddr == nil {
-				// Wait for sourceAddr to be set by the first goroutine
-				continue
-			}
 
 			gotAddr := addr.String()
 			headWriter := bytes.NewBuffer(replyBuf[:0])
