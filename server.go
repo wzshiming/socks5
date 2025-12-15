@@ -375,7 +375,8 @@ func (s *Server) handleAssociate(req *request) error {
 	}()
 
 	var (
-		sourceAddr net.Addr
+		sourceAddr   net.Addr
+		sourceAddrMu sync.Mutex
 	)
 
 	errCh := make(chan error, 2)
@@ -390,9 +391,11 @@ func (s *Server) handleAssociate(req *request) error {
 				return
 			}
 
+			sourceAddrMu.Lock()
 			if sourceAddr == nil {
 				sourceAddr = addr
 			}
+			sourceAddrMu.Unlock()
 
 			// Packet from client to target
 			if n < 3 {
@@ -429,7 +432,11 @@ func (s *Server) handleAssociate(req *request) error {
 				return
 			}
 
-			if sourceAddr == nil {
+			sourceAddrMu.Lock()
+			currentSourceAddr := sourceAddr
+			sourceAddrMu.Unlock()
+
+			if currentSourceAddr == nil {
 				// Wait for sourceAddr to be set by the first goroutine
 				continue
 			}
@@ -457,7 +464,7 @@ func (s *Server) handleAssociate(req *request) error {
 			copy(buf[prefixLen:prefixLen+n], buf[:n])
 			copy(buf[:prefixLen], headWriter.Bytes())
 
-			_, err = relayConn.WriteTo(buf[:prefixLen+n], sourceAddr)
+			_, err = relayConn.WriteTo(buf[:prefixLen+n], currentSourceAddr)
 			if err != nil {
 				errCh <- err
 				return
