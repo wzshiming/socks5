@@ -24,6 +24,10 @@ type Server struct {
 	// ProxyListenPacket specifies the optional proxyListenPacket function for
 	// establishing the transport connection.
 	ProxyListenPacket func(ctx context.Context, network string, address string) (net.PacketConn, error)
+	// ProxyOutgoingListenPacket specifies the optional proxyOutgoingListenPacket function for
+	// establishing the outgoing UDP connection in UDP Associate.
+	// If not set, it falls back to proxyDial for outgoing connections.
+	ProxyOutgoingListenPacket func(ctx context.Context, network string, address string) (net.PacketConn, error)
 	// PacketForwardAddress specifies the packet forwarding address
 	PacketForwardAddress func(ctx context.Context, destinationAddr string, packet net.PacketConn, conn net.Conn) (net.IP, int, error)
 	// ProxyListenBind specifies the optional proxyListenBind function for
@@ -323,20 +327,32 @@ func (s *Server) handleBind(req *request) error {
 func (s *Server) handleAssociate(req *request) error {
 	ctx := s.context()
 	destinationAddr := req.DestinationAddr.String()
-	udpConn, err := s.proxyListenPacket(ctx, "udp", destinationAddr)
+
+	// Relay connection for communicating with the client
+	relayConn, err := s.proxyListenPacket(ctx, "udp", destinationAddr)
 	if err != nil {
 		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
 			return fmt.Errorf("failed to send reply: %v", err)
 		}
 		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
 	}
-	defer udpConn.Close()
+	defer relayConn.Close()
+
+	// Outgoing connection for communicating with actual destinations
+	outgoingConn, err := s.proxyOutgoingListenPacket(ctx, "udp", "")
+	if err != nil {
+		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
+			return fmt.Errorf("failed to send reply: %v", err)
+		}
+		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
+	}
+	defer outgoingConn.Close()
 
 	replyPacketForwardAddress := defaultReplyPacketForwardAddress
 	if s.PacketForwardAddress != nil {
 		replyPacketForwardAddress = s.PacketForwardAddress
 	}
-	ip, port, err := replyPacketForwardAddress(ctx, destinationAddr, udpConn, req.Conn)
+	ip, port, err := replyPacketForwardAddress(ctx, destinationAddr, relayConn, req.Conn)
 	if err != nil {
 		return err
 	}
@@ -345,12 +361,14 @@ func (s *Server) handleAssociate(req *request) error {
 		return fmt.Errorf("failed to send reply: %v", err)
 	}
 
+	// Monitor TCP connection - close UDP connections when TCP closes
 	go func() {
 		var buf [1]byte
 		for {
 			_, err := req.Conn.Read(buf[:])
 			if err != nil {
-				udpConn.Close()
+				relayConn.Close()
+				outgoingConn.Close()
 				break
 			}
 		}
@@ -358,24 +376,24 @@ func (s *Server) handleAssociate(req *request) error {
 
 	var (
 		sourceAddr net.Addr
-		wantSource string
-		buf        [maxUdpPacket]byte
-		replyBuf   [maxHeaderSize]byte
 	)
 
-	for {
-		n, addr, err := udpConn.ReadFrom(buf[:])
-		if err != nil {
-			return err
-		}
+	errCh := make(chan error, 2)
 
-		if sourceAddr == nil {
-			sourceAddr = addr
-			wantSource = sourceAddr.String()
-		}
+	// Goroutine 1: Read from relay (client) and forward to outgoing (destinations)
+	go func() {
+		var buf [maxUdpPacket]byte
+		for {
+			n, addr, err := relayConn.ReadFrom(buf[:])
+			if err != nil {
+				errCh <- err
+				return
+			}
 
-		gotAddr := addr.String()
-		if wantSource == gotAddr {
+			if sourceAddr == nil {
+				sourceAddr = addr
+			}
+
 			// Packet from client to target
 			if n < 3 {
 				continue
@@ -392,11 +410,31 @@ func (s *Server) handleAssociate(req *request) error {
 				IP:   targetAddr.IP,
 				Port: targetAddr.Port,
 			}
-			_, err = udpConn.WriteTo(reader.Bytes(), target)
+			_, err = outgoingConn.WriteTo(reader.Bytes(), target)
 			if err != nil {
-				return err
+				errCh <- err
+				return
 			}
-		} else {
+		}
+	}()
+
+	// Goroutine 2: Read from outgoing (destinations) and forward to relay (client)
+	go func() {
+		var buf [maxUdpPacket]byte
+		var replyBuf [maxHeaderSize]byte
+		for {
+			n, addr, err := outgoingConn.ReadFrom(buf[:])
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			if sourceAddr == nil {
+				// Wait for sourceAddr to be set by the first goroutine
+				continue
+			}
+
+			gotAddr := addr.String()
 			headWriter := bytes.NewBuffer(replyBuf[:0])
 			headWriter.Write([]byte{0, 0, 0})
 			err = writeAddrWithStr(headWriter, gotAddr)
@@ -419,12 +457,16 @@ func (s *Server) handleAssociate(req *request) error {
 			copy(buf[prefixLen:prefixLen+n], buf[:n])
 			copy(buf[:prefixLen], headWriter.Bytes())
 
-			_, err = udpConn.WriteTo(buf[:prefixLen+n], sourceAddr)
+			_, err = relayConn.WriteTo(buf[:prefixLen+n], sourceAddr)
 			if err != nil {
-				return err
+				errCh <- err
+				return
 			}
 		}
-	}
+	}()
+
+	// Wait for error from either goroutine
+	return <-errCh
 }
 
 func (s *Server) proxyDial(ctx context.Context, network, address string) (net.Conn, error) {
@@ -443,6 +485,17 @@ func (s *Server) proxyListenPacket(ctx context.Context, network, address string)
 		proxyListenPacket = listener.ListenPacket
 	}
 	return proxyListenPacket(ctx, network, address)
+}
+
+func (s *Server) proxyOutgoingListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
+	proxyOutgoingListenPacket := s.ProxyOutgoingListenPacket
+	if proxyOutgoingListenPacket == nil {
+		// Fall back to standard ListenPacket with empty local address
+		// This is similar to how proxyDial works for TCP
+		var listener net.ListenConfig
+		return listener.ListenPacket(ctx, network, "")
+	}
+	return proxyOutgoingListenPacket(ctx, network, address)
 }
 
 func (s *Server) context() context.Context {

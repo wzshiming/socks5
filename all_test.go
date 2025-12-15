@@ -414,3 +414,88 @@ func TestSimpleServer(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+func TestUDPWithSeparateOutgoing(t *testing.T) {
+	// Create a UDP echo server
+	packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer packet.Close()
+	go func() {
+		var buf [maxUdpPacket]byte
+		for {
+			n, addr, err := packet.ReadFrom(buf[:])
+			if err != nil {
+				return
+			}
+			_, err = packet.WriteTo(buf[:n], addr)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Start SOCKS5 proxy with separate relay and outgoing listeners
+	listen, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listen.Close()
+
+	proxy := NewServer()
+
+	// Track which connections were used
+	var relayUsed, outgoingUsed bool
+
+	// Custom ProxyListenPacket for relay (client-facing)
+	proxy.ProxyListenPacket = func(ctx context.Context, network, address string) (net.PacketConn, error) {
+		relayUsed = true
+		var lc net.ListenConfig
+		return lc.ListenPacket(ctx, network, address)
+	}
+
+	// Custom ProxyOutgoingListenPacket for outgoing (destination-facing)
+	proxy.ProxyOutgoingListenPacket = func(ctx context.Context, network, address string) (net.PacketConn, error) {
+		outgoingUsed = true
+		var lc net.ListenConfig
+		return lc.ListenPacket(ctx, network, "")
+	}
+
+	go proxy.Serve(listen)
+
+	dial, err := NewDialer("socks5://" + listen.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := dial.Dial("udp", packet.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	want := make([]byte, 1024)
+	rand.Read(want)
+	_, err = conn.Write(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := make([]byte, len(want))
+	_, err = conn.Read(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(want, got) {
+		t.Fail()
+	}
+
+	// Verify that both custom functions were used
+	if !relayUsed {
+		t.Error("ProxyListenPacket was not used for relay connection")
+	}
+	if !outgoingUsed {
+		t.Error("ProxyOutgoingListenPacket was not used for outgoing connection")
+	}
+}
