@@ -456,6 +456,7 @@ func (s *Server) handleAssociateLegacy(ctx context.Context, req *request, udpCon
 }
 
 func (s *Server) handleAssociateWithSeparateConns(ctx context.Context, req *request, relayConn, outgoingConn net.PacketConn) error {
+	// Buffer size of 3 to hold errors from 3 goroutines (TCP monitor, relay reader, outgoing reader)
 	errChan := make(chan error, 3)
 	
 	// Monitor TCP connection and close UDP connections when it closes
@@ -520,8 +521,15 @@ func (s *Server) handleAssociateWithSeparateConns(ctx context.Context, req *requ
 		var buf [maxUdpPacket]byte
 		var replyBuf [maxHeaderSize]byte
 		
-		// Wait for source address to be set
-		sourceAddr := <-sourceAddrChan
+		// Wait for source address to be set with timeout
+		var sourceAddr net.Addr
+		select {
+		case sourceAddr = <-sourceAddrChan:
+		case <-time.After(30 * time.Second):
+			// Timeout waiting for client to send first packet
+			errChan <- fmt.Errorf("timeout waiting for client packet")
+			return
+		}
 		
 		for {
 			n, addr, err := outgoingConn.ReadFrom(buf[:])
