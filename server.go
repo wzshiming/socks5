@@ -327,22 +327,20 @@ func (s *Server) handleBind(req *request) error {
 func (s *Server) handleAssociate(req *request) error {
 	ctx := s.context()
 	destinationAddr := req.DestinationAddr.String()
-
-	// Create relay connection for client communication
-	relayConn, err := s.proxyListenPacket(ctx, "udp", destinationAddr)
+	udpConn, err := s.proxyListenPacket(ctx, "udp", destinationAddr)
 	if err != nil {
 		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
 			return fmt.Errorf("failed to send reply: %v", err)
 		}
 		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
 	}
-	defer relayConn.Close()
+	defer udpConn.Close()
 
 	replyPacketForwardAddress := defaultReplyPacketForwardAddress
 	if s.PacketForwardAddress != nil {
 		replyPacketForwardAddress = s.PacketForwardAddress
 	}
-	ip, port, err := replyPacketForwardAddress(ctx, destinationAddr, relayConn, req.Conn)
+	ip, port, err := replyPacketForwardAddress(ctx, destinationAddr, udpConn, req.Conn)
 	if err != nil {
 		return err
 	}
@@ -351,25 +349,19 @@ func (s *Server) handleAssociate(req *request) error {
 		return fmt.Errorf("failed to send reply: %v", err)
 	}
 
-	// Check if we should use separate connections for outgoing traffic
-	useSeparateConn := s.ProxyOutgoingListenPacket != nil
-
-	var outgoingConn net.PacketConn
-	if useSeparateConn {
-		// Create separate connection for outgoing traffic
-		outgoingConn, err = s.proxyOutgoingListenPacket(ctx, "udp", destinationAddr)
-		if err != nil {
-			if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
-				return fmt.Errorf("failed to send reply: %v", err)
-			}
-			return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
-		}
-		defer outgoingConn.Close()
-		return s.handleAssociateWithSeparateConns(ctx, req, relayConn, outgoingConn)
+	if s.ProxyOutgoingListenPacket == nil {
+		return s.handleAssociateLegacy(ctx, req, udpConn)
 	}
 
-	// Use legacy single-connection mode
-	return s.handleAssociateLegacy(ctx, req, relayConn)
+	outgoingConn, err := s.ProxyOutgoingListenPacket(ctx, "udp", ":0")
+	if err != nil {
+		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
+			return fmt.Errorf("failed to send reply: %v", err)
+		}
+		return fmt.Errorf("outgoing connect failed: %w", err)
+	}
+	defer outgoingConn.Close()
+	return s.handleAssociateWithSeparateConns(ctx, req, udpConn, outgoingConn)
 }
 
 func (s *Server) handleAssociateLegacy(ctx context.Context, req *request, udpConn net.PacketConn) error {
@@ -455,17 +447,15 @@ func (s *Server) handleAssociateLegacy(ctx context.Context, req *request, udpCon
 	}
 }
 
-func (s *Server) handleAssociateWithSeparateConns(ctx context.Context, req *request, relayConn, outgoingConn net.PacketConn) error {
-	// Buffer size of 3 to hold errors from 3 goroutines (TCP monitor, relay reader, outgoing reader)
+func (s *Server) handleAssociateWithSeparateConns(ctx context.Context, req *request, udpConn, outgoingConn net.PacketConn) error {
 	errChan := make(chan error, 3)
 
-	// Monitor TCP connection and close UDP connections when it closes
 	go func() {
 		var buf [1]byte
 		for {
 			_, err := req.Conn.Read(buf[:])
 			if err != nil {
-				relayConn.Close()
+				udpConn.Close()
 				outgoingConn.Close()
 				errChan <- nil
 				break
@@ -473,29 +463,75 @@ func (s *Server) handleAssociateWithSeparateConns(ctx context.Context, req *requ
 		}
 	}()
 
-	// Use a channel to communicate the source address
-	sourceAddrChan := make(chan net.Addr, 1)
+	var (
+		sourceAddr net.Addr
+		wantSource string
+	)
 
-	// Handle packets from client to remote destinations
 	go func() {
 		var buf [maxUdpPacket]byte
 		for {
-			n, addr, err := relayConn.ReadFrom(buf[:])
+			n, addr, err := udpConn.ReadFrom(buf[:])
 			if err != nil {
 				errChan <- err
 				return
 			}
 
-			// Set source address on first packet
-			select {
-			case sourceAddrChan <- addr:
-			default:
+			if sourceAddr == nil {
+				sourceAddr = addr
+				wantSource = sourceAddr.String()
+				go func() {
+					var buf [maxUdpPacket]byte
+					var replyBuf [maxHeaderSize]byte
+
+					for {
+						n, addr, err := outgoingConn.ReadFrom(buf[:])
+						if err != nil {
+							errChan <- err
+							return
+						}
+
+						gotAddr := addr.String()
+						headWriter := bytes.NewBuffer(replyBuf[:0])
+						headWriter.Write([]byte{0, 0, 0})
+						err = writeAddrWithStr(headWriter, gotAddr)
+						if err != nil {
+							if s.Logger != nil {
+								s.Logger.Println(err)
+							}
+							continue
+						}
+						prefixLen := headWriter.Len()
+
+						// Check if data length plus header exceeds maximum UDP packet limit
+						if prefixLen+n > maxUdpPacket {
+							if s.Logger != nil {
+								s.Logger.Println(fmt.Errorf("dropping packet: data length (%d) + header length (%d) = %d exceeds max UDP packet size %d", n, prefixLen, prefixLen+n, maxUdpPacket))
+							}
+							continue
+						}
+
+						copy(buf[prefixLen:prefixLen+n], buf[:n])
+						copy(buf[:prefixLen], headWriter.Bytes())
+
+						_, err = udpConn.WriteTo(buf[:prefixLen+n], sourceAddr)
+						if err != nil {
+							errChan <- err
+							return
+						}
+					}
+				}()
 			}
 
 			// Packet from client to target
 			if n < 3 {
 				continue
 			}
+
+			if addr.String() != wantSource {
+				continue
+			}
+
 			reader := bytes.NewBuffer(buf[3:n])
 			targetAddr, err := readAddr(reader)
 			if err != nil {
@@ -516,60 +552,6 @@ func (s *Server) handleAssociateWithSeparateConns(ctx context.Context, req *requ
 		}
 	}()
 
-	// Handle packets from remote destinations to client
-	go func() {
-		var buf [maxUdpPacket]byte
-		var replyBuf [maxHeaderSize]byte
-
-		// Wait for source address to be set with timeout
-		var sourceAddr net.Addr
-		select {
-		case sourceAddr = <-sourceAddrChan:
-		case <-time.After(30 * time.Second):
-			// Timeout waiting for client to send first packet
-			errChan <- fmt.Errorf("timeout waiting for client packet")
-			return
-		}
-
-		for {
-			n, addr, err := outgoingConn.ReadFrom(buf[:])
-			if err != nil {
-				errChan <- err
-				return
-			}
-
-			gotAddr := addr.String()
-			headWriter := bytes.NewBuffer(replyBuf[:0])
-			headWriter.Write([]byte{0, 0, 0})
-			err = writeAddrWithStr(headWriter, gotAddr)
-			if err != nil {
-				if s.Logger != nil {
-					s.Logger.Println(err)
-				}
-				continue
-			}
-			prefixLen := headWriter.Len()
-
-			// Check if data length plus header exceeds maximum UDP packet limit
-			if prefixLen+n > maxUdpPacket {
-				if s.Logger != nil {
-					s.Logger.Println(fmt.Errorf("dropping packet: data length (%d) + header length (%d) = %d exceeds max UDP packet size %d", n, prefixLen, prefixLen+n, maxUdpPacket))
-				}
-				continue
-			}
-
-			copy(buf[prefixLen:prefixLen+n], buf[:n])
-			copy(buf[:prefixLen], headWriter.Bytes())
-
-			_, err = relayConn.WriteTo(buf[:prefixLen+n], sourceAddr)
-			if err != nil {
-				errChan <- err
-				return
-			}
-		}
-	}()
-
-	// Wait for any error or connection close
 	return <-errChan
 }
 
@@ -589,15 +571,6 @@ func (s *Server) proxyListenPacket(ctx context.Context, network, address string)
 		proxyListenPacket = listener.ListenPacket
 	}
 	return proxyListenPacket(ctx, network, address)
-}
-
-func (s *Server) proxyOutgoingListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
-	proxyOutgoingListenPacket := s.ProxyOutgoingListenPacket
-	if proxyOutgoingListenPacket == nil {
-		// Fall back to proxyListenPacket for backward compatibility
-		return s.proxyListenPacket(ctx, network, address)
-	}
-	return proxyOutgoingListenPacket(ctx, network, address)
 }
 
 func (s *Server) context() context.Context {
