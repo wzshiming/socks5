@@ -414,3 +414,71 @@ func TestSimpleServer(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+func TestUDPWithSeparateConnections(t *testing.T) {
+	// Create UDP echo server
+	packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer packet.Close()
+	go func() {
+		var buf [maxUdpPacket]byte
+		for {
+			n, addr, err := packet.ReadFrom(buf[:])
+			if err != nil {
+				return
+			}
+			_, err = packet.WriteTo(buf[:n], addr)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Start SOCKS5 proxy with separate outgoing connection
+	listen, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listen.Close()
+
+	proxy := NewServer()
+
+	// Configure to use separate connections
+	proxy.ProxyOutgoingListenPacket = func(ctx context.Context, network string, address string) (net.PacketConn, error) {
+		var lc net.ListenConfig
+		return lc.ListenPacket(ctx, network, "127.0.0.1:0")
+	}
+
+	go proxy.Serve(listen)
+
+	dial, err := NewDialer("socks5://" + listen.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := dial.Dial("udp", packet.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Send data through the proxy
+	want := make([]byte, 1024)
+	rand.Read(want)
+	_, err = conn.Write(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Receive echoed data
+	got := make([]byte, len(want))
+	_, err = conn.Read(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(want, got) {
+		t.Fatal("data mismatch")
+	}
+}
