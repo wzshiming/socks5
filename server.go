@@ -388,8 +388,37 @@ func (s *Server) handleAssociate(req *request) error {
 				}
 				continue
 			}
+			var targetIP net.IP
+			if targetAddr.IP != nil {
+				// socks5:// protocol with known IP
+				targetIP = targetAddr.IP
+			} else if targetAddr.Name != "" {
+				// socks5:// protocol, we need resolve domain name to IP address
+				ips, err := net.LookupIP(targetAddr.Name)
+				if err != nil {
+					if s.Logger != nil {
+						s.Logger.Println(fmt.Errorf("failed to resolve %s: %w", targetAddr.Name, err))
+					}
+					continue
+				}
+				if len(ips) == 0 {
+					if s.Logger != nil {
+						s.Logger.Println(fmt.Errorf("no IP addresses found for %s", targetAddr.Name))
+					}
+					continue
+				}
+				targetIP = ips[0]
+				if s.Logger != nil {
+					s.Logger.Println(fmt.Sprintf("Resolved %s to %v", targetAddr.Name, targetIP))
+				}
+			} else {
+				if s.Logger != nil {
+					s.Logger.Println(fmt.Errorf("no valid address in UDP packet"))
+				}
+				continue
+			}
 			target := &net.UDPAddr{
-				IP:   targetAddr.IP,
+				IP:   targetIP,
 				Port: targetAddr.Port,
 			}
 			_, err = udpConn.WriteTo(reader.Bytes(), target)
