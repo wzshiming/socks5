@@ -390,10 +390,8 @@ func (s *Server) handleAssociate(req *request) error {
 			}
 			var targetIP net.IP
 			if targetAddr.IP != nil {
-				// socks5:// protocol with known IP
 				targetIP = targetAddr.IP
 			} else if targetAddr.Name != "" {
-				// socks5:// protocol, we need resolve domain name to IP address
 				ips, err := net.LookupIP(targetAddr.Name)
 				if err != nil {
 					if s.Logger != nil {
