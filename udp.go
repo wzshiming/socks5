@@ -21,7 +21,7 @@ type UDPConn struct {
 	net.PacketConn
 }
 
-func conventToUDPAddr(addr net.Addr) (*net.UDPAddr, error) {
+func convertToUDPAddr(addr net.Addr) (*net.UDPAddr, error) {
 	udpAddr, ok := addr.(*net.UDPAddr)
 	if ok {
 		return udpAddr, nil
@@ -51,11 +51,11 @@ func conventToUDPAddr(addr net.Addr) (*net.UDPAddr, error) {
 }
 
 func NewUDPConn(raw net.PacketConn, proxyAddress net.Addr, defaultTarget net.Addr) (*UDPConn, error) {
-	proxyAddr, err := conventToUDPAddr(proxyAddress)
+	proxyAddr, err := convertToUDPAddr(proxyAddress)
 	if err != nil {
 		return nil, err
 	}
-	defaultTargetAddr, err := conventToUDPAddr(defaultTarget)
+	defaultTargetAddr, err := convertToUDPAddr(defaultTarget)
 	if err != nil {
 		return nil, err
 	}
