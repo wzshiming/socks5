@@ -122,7 +122,12 @@ func (d *Dialer) do(ctx context.Context, cmd Command, address string) (net.Conn,
 		return nil, err
 	}
 
-	return d.connect(ctx, conn, cmd, address)
+	c, err := d.connect(ctx, conn, cmd, address)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return c, nil
 }
 
 func (d *Dialer) connect(ctx context.Context, conn net.Conn, cmd Command, address string) (net.Conn, error) {
