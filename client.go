@@ -180,7 +180,17 @@ func (d *Dialer) connect(ctx context.Context, conn net.Conn, cmd Command, addres
 			return nil, err
 		}
 
-		udpConn, err := d.proxyPacketDial(ctx, "udp", ":0")
+		proxyAddr := &net.UDPAddr{
+			IP:   net.ParseIP(proxyIP),
+			Port: proxyPort,
+		}
+		network := "udp"
+		if proxyAddr.IP.To4() != nil {
+			network = "udp4"
+		} else if proxyAddr.IP != nil {
+			network = "udp6"
+		}
+		udpConn, err := d.proxyPacketDial(ctx, network, ":0")
 		if err != nil {
 			return nil, err
 		}
@@ -189,11 +199,7 @@ func (d *Dialer) connect(ctx context.Context, conn net.Conn, cmd Command, addres
 			IP:   net.ParseIP(targetIP),
 			Port: targetPort,
 		}
-		proxyAddr := &net.UDPAddr{
-			IP:   net.ParseIP(proxyIP),
-			Port: proxyPort,
-		}
-		wrapConn, err := NewUDPConn(udpConn, proxyAddr, targetAddr)
+		wrapConn, err := newUDPConn(udpConn, proxyAddr, targetAddr, conn)
 		if err != nil {
 			return nil, err
 		}
