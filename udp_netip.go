@@ -12,19 +12,23 @@ func (c *UDPConn) ReadFromUDPAddrPort(b []byte) (n int, addr netip.AddrPort, err
 	if !ok {
 		return 0, addr, errUnsupportedMethod
 	}
-	n, addr, err = udpConn.ReadFromUDPAddrPort(c.bufRead[:])
-	if err != nil {
-		return 0, addr, err
+	var a *address
+	for {
+		n, addr, err = udpConn.ReadFromUDPAddrPort(c.bufRead[:])
+		if err != nil {
+			return 0, addr, err
+		}
+		if n < len(c.prefix) || addr.String() != c.proxyAddress.String() {
+			continue
+		}
+		buf := bytes.NewBuffer(c.bufRead[len(c.prefix):n])
+		a, err = readAddr(buf)
+		if err != nil {
+			continue
+		}
+		n = copy(b, buf.Bytes())
+		break
 	}
-	if n < len(c.prefix) || addr.String() != c.proxyAddress.String() {
-		return 0, addr, errBadHeader
-	}
-	buf := bytes.NewBuffer(c.bufRead[len(c.prefix):n])
-	a, err := readAddr(buf)
-	if err != nil {
-		return 0, addr, err
-	}
-	n = copy(b, buf.Bytes())
 	netipaddr, err := netip.ParseAddr(a.IP.String())
 	if err != nil {
 		return 0, addr, err
@@ -38,19 +42,23 @@ func (c *UDPConn) ReadMsgUDPAddrPort(b, oob []byte) (n, oobn, flags int, addr ne
 	if !ok {
 		return 0, 0, 0, addr, errUnsupportedMethod
 	}
-	n, oobn, flags, addr, err = udpConn.ReadMsgUDPAddrPort(c.bufRead[:], oob)
-	if err != nil {
-		return 0, 0, 0, addr, err
+	var a *address
+	for {
+		n, oobn, flags, addr, err = udpConn.ReadMsgUDPAddrPort(c.bufRead[:], oob)
+		if err != nil {
+			return 0, 0, 0, addr, err
+		}
+		if n < len(c.prefix) || addr.String() != c.proxyAddress.String() {
+			continue
+		}
+		buf := bytes.NewBuffer(c.bufRead[len(c.prefix):n])
+		a, err = readAddr(buf)
+		if err != nil {
+			continue
+		}
+		n = copy(b, buf.Bytes())
+		break
 	}
-	if n < len(c.prefix) || addr.String() != c.proxyAddress.String() {
-		return 0, 0, 0, addr, errBadHeader
-	}
-	buf := bytes.NewBuffer(c.bufRead[len(c.prefix):n])
-	a, err := readAddr(buf)
-	if err != nil {
-		return 0, 0, 0, addr, err
-	}
-	n = copy(b, buf.Bytes())
 	netipaddr, err := netip.ParseAddr(a.IP.String())
 	if err != nil {
 		return 0, 0, 0, addr, err
